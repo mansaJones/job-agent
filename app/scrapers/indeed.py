@@ -71,19 +71,20 @@ class IndeedScraper(BaseScraper):
         """Parse an Indeed search results page.
 
         Indeed renders job cards in a few different structures. We try
-        multiple selectors to handle layout variations.
+        embedded JSON first (richer data including descriptions), then
+        fall back to HTML card parsing.
         """
         soup = BeautifulSoup(html, "lxml")
+
+        # Strategy 1: Try embedded JSON data first — often has full descriptions
+        jobs_from_script = self._parse_from_script_data(soup)
+        if jobs_from_script:
+            logger.info("[indeed] Extracted %d jobs from embedded JSON", len(jobs_from_script))
+            return jobs_from_script
+
+        # Strategy 2: Parse HTML job cards
         jobs: list[JobRecord] = []
-
-        # Strategy 1: Look for job cards via data attributes
         job_cards = soup.select("div.job_seen_beacon, div.jobsearch-ResultsList > div[data-jk]")
-
-        # Strategy 2: Fallback — look for mosaic provider script data
-        if not job_cards:
-            jobs_from_script = self._parse_from_script_data(soup)
-            if jobs_from_script:
-                return jobs_from_script
 
         # Strategy 3: Broader selector
         if not job_cards:
@@ -152,12 +153,34 @@ class IndeedScraper(BaseScraper):
         salary_min, salary_max = self._parse_salary(card)
 
         # --- Snippet / description ---
+        # Indeed uses many different class names depending on the page variant.
+        # Try multiple selectors, broadest last.
         snippet_el = (
             card.select_one("div.job-snippet")
             or card.select_one("div[class*='snippet']")
             or card.select_one("table.jobCardShelfContainer")
+            or card.select_one("div[class*='job-snippet']")
+            or card.select_one("ul[class*='jobMetaData']")
+            or card.select_one("div[class*='metadata']")
         )
-        snippet = snippet_el.get_text(strip=True) if snippet_el else None
+        snippet = snippet_el.get_text(separator=" ", strip=True) if snippet_el else None
+
+        # If no snippet from known selectors, grab all visible text from the card
+        # below the title/company/location as a fallback
+        if not snippet:
+            all_text = card.get_text(separator="\n", strip=True)
+            # Strip out the title, company, location we already have
+            lines = [
+                line.strip() for line in all_text.split("\n")
+                if line.strip()
+                and line.strip() != title
+                and line.strip() != (company or "")
+                and line.strip() != (location or "")
+                and not line.strip().startswith("$")
+                and "ago" not in line.strip().lower()[:15]
+            ]
+            if lines:
+                snippet = " ".join(lines)
 
         # --- Date posted ---
         date_el = card.select_one("span.date, span[class*='date']")
@@ -356,39 +379,85 @@ class IndeedScraper(BaseScraper):
     async def enrich_job(self, job: JobRecord) -> JobRecord:
         """Fetch the full job detail page and extract the complete description.
 
-        Call this after initial listing parse to get the full job text
-        instead of just the snippet.
+        Tries multiple strategies:
+          1. Direct Indeed detail page (often blocked)
+          2. Google cache of the Indeed page
+          3. Indeed via Playwright with extended wait for JS content
         """
+        # --- Strategy 1: Direct fetch (fast, often blocked) ---
         result = await self.fetch_page(job.url)
-        if result.status != FetchStatus.SUCCESS or result.html is None:
-            return job
+        if result.status == FetchStatus.SUCCESS and result.html:
+            desc = self._extract_description_from_html(result.html, job.url)
+            if desc and len(desc) > 100:
+                job.description = desc
+                return job
 
-        html = result.html
+        # --- Strategy 2: Google cache ---
+        jk = self._extract_job_key(job.url, BeautifulSoup("", "lxml"))
+        if jk:
+            cache_url = f"https://webcache.googleusercontent.com/search?q=cache:indeed.com/viewjob?jk={jk}"
+            cache_result = await self._fetch_httpx(cache_url)
+            if cache_result.status == FetchStatus.SUCCESS and cache_result.html:
+                desc = self._extract_description_from_html(cache_result.html, cache_url)
+                if desc and len(desc) > 100:
+                    job.description = desc
+                    return job
 
-        soup = BeautifulSoup(html, "lxml")
-
-        # Save full HTML snapshot
-        self.save_html_snapshot(html, "indeed_detail", job.url)
-
-        # Extract full description
-        desc_el = (
-            soup.select_one("#jobDescriptionText")
-            or soup.select_one("div[id*='jobDescription']")
-            or soup.select_one("div.jobsearch-jobDescriptionText")
-        )
-        if desc_el:
-            job.description = desc_el.get_text(separator="\n", strip=True)
-            job.raw_html = str(desc_el)
-
-        # Try to get salary if we didn't have it from listing
-        if job.salary_min is None and job.salary_max is None:
-            salary_el = soup.select_one("#salaryInfoAndJobType, div[class*='salary']")
-            if salary_el:
-                job.salary_min, job.salary_max = self._parse_salary_text(
-                    salary_el.get_text(strip=True)
+        # --- Strategy 3: Playwright with longer wait + click "show more" ---
+        try:
+            from playwright.async_api import async_playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True, args=["--no-sandbox"],
                 )
+                page = await browser.new_page()
+                resp = await page.goto(job.url, wait_until="domcontentloaded", timeout=30000)
+
+                if resp and resp.status == 200:
+                    # Wait for JS rendering
+                    await page.wait_for_timeout(3000)
+
+                    # Try to click any "show full description" button
+                    for btn_sel in ["button#jobDescriptionToggle", "button[aria-label*='description']",
+                                    "button[class*='more']"]:
+                        btn = await page.query_selector(btn_sel)
+                        if btn:
+                            await btn.click()
+                            await page.wait_for_timeout(1000)
+                            break
+
+                    html = await page.content()
+                    desc = self._extract_description_from_html(html, job.url)
+                    if desc and len(desc) > 100:
+                        job.description = desc
+
+                await browser.close()
+        except Exception as e:
+            logger.debug("[indeed] Playwright enrich failed for %s: %s", job.url, e)
 
         return job
+
+    def _extract_description_from_html(self, html: str, url: str) -> str | None:
+        """Extract job description from a detail page HTML using multiple selectors."""
+        soup = BeautifulSoup(html, "lxml")
+        self.save_html_snapshot(html, "indeed_detail", url)
+
+        # Try known description selectors
+        for selector in [
+            "#jobDescriptionText",
+            "div[id*='jobDescription']",
+            "div.jobsearch-jobDescriptionText",
+            "div[class*='jobDescription']",
+            "div[class*='description']",
+            "article",
+        ]:
+            el = soup.select_one(selector)
+            if el:
+                text = el.get_text(separator="\n", strip=True)
+                if text and len(text) > 100:
+                    return text
+
+        return None
 
     async def run(self) -> "ScraperStats":
         """Override base run to add detail-page enrichment for jobs missing descriptions."""
