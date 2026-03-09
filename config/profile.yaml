@@ -1,0 +1,48 @@
+# config/profile.yaml — Your target job profile
+# Edit these values to match what you're actually looking for.
+
+target_roles:
+  - "Lead Frontend Developer"
+  - "Web Development Lead"
+  - "Front End Engineering Manager"
+  - "Senior Frontend Developer"
+  - "Development Manager"
+
+skills:
+  must_have:
+    - "JavaScript"
+    - "React"
+    - "TypeScript"
+    - "HTML"
+    - "CSS"
+  nice_to_have:
+    - "Node.js"
+    - "AEM"
+    - "Angular"
+    - "Python"
+    - "Azure"
+    - "CI/CD"
+    - "RESTful APIs"
+    - "SQL"
+    - "Git"
+    - "Redux"
+    - "Bootstrap"
+
+preferences:
+  location: "Homewood, IL"
+  remote_ok: true
+  hybrid_ok: true
+  onsite_ok: false
+  max_commute_miles: 40
+  salary_min: 130000
+  experience_years: 15
+
+blacklist:
+  companies:
+    - "Company You Hate Inc."
+  keywords:
+    - "unpaid"
+    - "intern"
+    - "clearance required"
+    - "junior"
+    - "entry level"

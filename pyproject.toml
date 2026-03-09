@@ -1,0 +1,47 @@
+[project]
+name = "job-agent"
+version = "0.1.0"
+description = "Autonomous job search agent for Jetson Orin Nano"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx[http2]>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "pyyaml>=6.0",
+    "aiosqlite>=0.20",
+    "apscheduler>=3.10",
+    "python-dotenv>=1.0",
+    "rich>=13.0",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+    "mypy>=1.8",
+]
+browser = [
+    "playwright>=1.40",
+]
+
+[project.scripts]
+job-agent = "app.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

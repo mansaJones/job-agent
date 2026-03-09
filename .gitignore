@@ -1,0 +1,35 @@
+# Secrets
+config/secrets.env
+
+# Database
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/backups/
+data/html_snapshots/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Virtualenv
+venv/
+.venv/
+
+# Logs
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

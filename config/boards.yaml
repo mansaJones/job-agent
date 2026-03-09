@@ -1,0 +1,34 @@
+# config/boards.yaml — Per-board scraper configuration
+# Each board gets its own search params and rate-limit settings.
+
+boards:
+  indeed:
+    enabled: true
+    module: "app.scrapers.indeed"
+    base_url: "https://www.indeed.com"
+    search_queries:
+      - "lead frontend developer"
+      - "web development lead"
+      - "front end engineering manager"
+    location: "Country Club Hills, IL"
+    radius_miles: 25
+    max_pages: 3
+    delay_min: 10.0
+    delay_max: 30.0
+    headers:
+      Accept-Language: "en-US,en;q=0.9"
+
+  # Future scrapers — disabled until implemented
+  dice:
+    enabled: false
+    module: "app.scrapers.dice"
+    base_url: "https://www.dice.com"
+    search_queries:
+      - "devops engineer"
+      - "cloud engineer"
+    location: "Chicago, IL"
+    radius_miles: 40
+    max_pages: 3
+    delay_min: 10.0
+    delay_max: 30.0
+    headers: {}

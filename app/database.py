@@ -1,0 +1,344 @@
+"""Database layer — async SQLite with WAL mode.
+
+Provides the Database class that manages the connection pool, schema
+migrations, and all CRUD operations for jobs, evaluations, decisions,
+and applications.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Data models (what goes in and out of the DB)
+# ---------------------------------------------------------------------------
+
+class JobRecord(BaseModel):
+    """A single job listing."""
+
+    id: int | None = None
+    source: str
+    external_id: str | None = None
+    url: str
+    title: str
+    company: str | None = None
+    location: str | None = None
+    salary_min: float | None = None
+    salary_max: float | None = None
+    description: str | None = None
+    raw_html: str | None = None
+    date_posted: str | None = None
+    date_scraped: str | None = None
+    status: str = "new"
+
+
+class EvaluationRecord(BaseModel):
+    """LLM evaluation of a job."""
+
+    id: int | None = None
+    job_id: int
+    model_used: str
+    match_score: float | None = None
+    reasoning: str | None = None
+    cover_letter_draft: str | None = None
+    evaluated_at: str | None = None
+
+
+class DecisionRecord(BaseModel):
+    """User decision on a job."""
+
+    id: int | None = None
+    job_id: int
+    decision: str  # 'approved', 'rejected', 'maybe'
+    notes: str | None = None
+    decided_at: str | None = None
+
+
+class AppliedRecord(BaseModel):
+    """Record of a job application."""
+
+    id: int | None = None
+    job_id: int
+    method: str | None = None  # 'manual', 'assisted'
+    applied_at: str | None = None
+    follow_up_date: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Schema DDL
+# ---------------------------------------------------------------------------
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    external_id TEXT,
+    url TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    company TEXT,
+    location TEXT,
+    salary_min REAL,
+    salary_max REAL,
+    description TEXT,
+    raw_html TEXT,
+    date_posted TEXT,
+    date_scraped TEXT DEFAULT (datetime('now')),
+    status TEXT DEFAULT 'new'
+);
+
+CREATE TABLE IF NOT EXISTS evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id),
+    model_used TEXT NOT NULL,
+    match_score REAL,
+    reasoning TEXT,
+    cover_letter_draft TEXT,
+    evaluated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id),
+    decision TEXT NOT NULL,
+    notes TEXT,
+    decided_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS applied (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id),
+    method TEXT,
+    applied_at TEXT DEFAULT (datetime('now')),
+    follow_up_date TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_source_ext
+    ON jobs(source, external_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_status
+    ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_evaluations_score
+    ON evaluations(match_score);
+"""
+
+
+# ---------------------------------------------------------------------------
+# Database class
+# ---------------------------------------------------------------------------
+
+class Database:
+    """Async SQLite database manager.
+
+    Usage:
+        db = Database("/path/to/jobs.db")
+        await db.initialize()
+        # ... use it ...
+        await db.close()
+
+    Or as an async context manager:
+        async with Database("/path/to/jobs.db") as db:
+            ...
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
+        self.db_path = Path(db_path)
+        self._conn: aiosqlite.Connection | None = None
+
+    async def initialize(self) -> None:
+        """Open connection, enable WAL mode, create schema."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = await aiosqlite.connect(str(self.db_path))
+        self._conn.row_factory = aiosqlite.Row
+
+        # WAL mode for better concurrent read/write performance
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA foreign_keys=ON")
+        await self._conn.execute("PRAGMA busy_timeout=5000")
+
+        await self._conn.executescript(SCHEMA_SQL)
+        await self._conn.commit()
+        logger.info("Database initialized at %s (WAL mode)", self.db_path)
+
+    async def close(self) -> None:
+        """Close the database connection."""
+        if self._conn:
+            await self._conn.close()
+            self._conn = None
+            logger.info("Database connection closed")
+
+    async def __aenter__(self) -> Database:
+        await self.initialize()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
+
+    @property
+    def conn(self) -> aiosqlite.Connection:
+        if self._conn is None:
+            raise RuntimeError("Database not initialized — call initialize() first")
+        return self._conn
+
+    # ------------------------------------------------------------------
+    # Jobs CRUD
+    # ------------------------------------------------------------------
+
+    async def insert_job(self, job: JobRecord) -> int | None:
+        """Insert a job, returning the new row ID. Returns None if duplicate URL."""
+        try:
+            cursor = await self.conn.execute(
+                """
+                INSERT INTO jobs (source, external_id, url, title, company, location,
+                                  salary_min, salary_max, description, raw_html,
+                                  date_posted, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.source, job.external_id, job.url, job.title, job.company,
+                    job.location, job.salary_min, job.salary_max, job.description,
+                    job.raw_html, job.date_posted, job.status,
+                ),
+            )
+            await self.conn.commit()
+            logger.debug("Inserted job: %s — %s", job.title, job.company)
+            return cursor.lastrowid
+        except aiosqlite.IntegrityError:
+            logger.debug("Duplicate job skipped: %s", job.url)
+            return None
+
+    async def get_job(self, job_id: int) -> JobRecord | None:
+        """Fetch a single job by ID."""
+        cursor = await self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return JobRecord(**dict(row))
+
+    async def get_jobs_by_status(
+        self,
+        status: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[JobRecord]:
+        """Fetch jobs by status, newest first."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM jobs WHERE status = ? ORDER BY date_scraped DESC LIMIT ? OFFSET ?",
+            (status, limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [JobRecord(**dict(r)) for r in rows]
+
+    async def get_new_jobs(self, limit: int = 100) -> list[JobRecord]:
+        """Convenience: fetch jobs with status 'new'."""
+        return await self.get_jobs_by_status("new", limit=limit)
+
+    async def update_job_status(self, job_id: int, status: str) -> None:
+        """Update the status of a job."""
+        await self.conn.execute(
+            "UPDATE jobs SET status = ? WHERE id = ?", (status, job_id)
+        )
+        await self.conn.commit()
+
+    async def job_url_exists(self, url: str) -> bool:
+        """Check if a job URL is already in the database."""
+        cursor = await self.conn.execute(
+            "SELECT 1 FROM jobs WHERE url = ? LIMIT 1", (url,)
+        )
+        return await cursor.fetchone() is not None
+
+    async def count_jobs(self, status: str | None = None) -> int:
+        """Count jobs, optionally filtered by status."""
+        if status:
+            cursor = await self.conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status = ?", (status,)
+            )
+        else:
+            cursor = await self.conn.execute("SELECT COUNT(*) FROM jobs")
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    # ------------------------------------------------------------------
+    # Evaluations CRUD
+    # ------------------------------------------------------------------
+
+    async def insert_evaluation(self, evaluation: EvaluationRecord) -> int:
+        """Insert an evaluation record."""
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO evaluations (job_id, model_used, match_score, reasoning,
+                                     cover_letter_draft)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                evaluation.job_id, evaluation.model_used, evaluation.match_score,
+                evaluation.reasoning, evaluation.cover_letter_draft,
+            ),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    async def get_evaluation(self, job_id: int) -> EvaluationRecord | None:
+        """Get the latest evaluation for a job."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM evaluations WHERE job_id = ? ORDER BY evaluated_at DESC LIMIT 1",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return EvaluationRecord(**dict(row))
+
+    # ------------------------------------------------------------------
+    # Decisions CRUD
+    # ------------------------------------------------------------------
+
+    async def insert_decision(self, decision: DecisionRecord) -> int:
+        """Record a user decision on a job."""
+        cursor = await self.conn.execute(
+            "INSERT INTO decisions (job_id, decision, notes) VALUES (?, ?, ?)",
+            (decision.job_id, decision.decision, decision.notes),
+        )
+        await self.conn.commit()
+
+        # Also update the job status to match the decision
+        status_map = {"approved": "approved", "rejected": "rejected", "maybe": "evaluated"}
+        new_status = status_map.get(decision.decision, decision.decision)
+        await self.update_job_status(decision.job_id, new_status)
+
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------
+    # Applied CRUD
+    # ------------------------------------------------------------------
+
+    async def insert_applied(self, applied: AppliedRecord) -> int:
+        """Record that you applied to a job."""
+        cursor = await self.conn.execute(
+            "INSERT INTO applied (job_id, method, follow_up_date) VALUES (?, ?, ?)",
+            (applied.job_id, applied.method, applied.follow_up_date),
+        )
+        await self.conn.commit()
+        await self.update_job_status(applied.job_id, "applied")
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    # ------------------------------------------------------------------
+    # Stats
+    # ------------------------------------------------------------------
+
+    async def get_stats(self) -> dict[str, int]:
+        """Get counts of jobs by status."""
+        cursor = await self.conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status"
+        )
+        rows = await cursor.fetchall()
+        stats = {row["status"]: row["cnt"] for row in rows}
+        stats["total"] = sum(stats.values())
+        return stats
