@@ -394,14 +394,14 @@ class IndeedScraper(BaseScraper):
         """Override base run to add detail-page enrichment for jobs missing descriptions."""
         stats = await super().run()
 
-        # Enrich jobs that only have snippets (no full description)
+        # Enrich jobs that are missing descriptions or only have short snippets
         new_jobs = await self.db.get_new_jobs(limit=50)
         enriched = 0
         for job in new_jobs:
             if job.id is None:
                 continue
-            # If description is short (snippet), try to get the full one
-            if job.description and len(job.description) < 200:
+            # Fetch full description if missing or just a snippet
+            if not job.description or len(job.description) < 200:
                 logger.info("[indeed] Enriching: %s", job.title)
                 enriched_job = await self.enrich_job(job)
                 if enriched_job.description and len(enriched_job.description) > len(job.description or ""):

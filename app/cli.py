@@ -119,6 +119,79 @@ def _load_scraper(module_path: str, board_cfg, profile, db) -> BaseScraper:  # t
 
 
 # ------------------------------------------------------------------
+# enrich command
+# ------------------------------------------------------------------
+
+@app.command()
+def enrich(
+    limit: int = typer.Option(
+        50, "--limit", "-n",
+        help="Max number of jobs to enrich.",
+    ),
+) -> None:
+    """Fetch full descriptions for jobs that are missing them."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        async with Database(settings.db_path) as db:
+            # Find jobs with missing or short descriptions
+            cursor = await db.conn.execute(
+                "SELECT * FROM jobs WHERE description IS NULL "
+                "OR length(description) < 200 "
+                "ORDER BY date_scraped DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            jobs = [__import__('app.database', fromlist=['JobRecord']).JobRecord(**dict(r)) for r in rows]
+
+            if not jobs:
+                console.print("[yellow]All jobs already have descriptions.[/yellow]")
+                return
+
+            console.print(f"Found [bold]{len(jobs)}[/bold] jobs needing enrichment")
+
+            # Load the Indeed scraper for its enrich_job method
+            indeed_cfg = settings.boards.boards.get("indeed")
+            if not indeed_cfg:
+                console.print("[red]No Indeed board config found[/red]")
+                return
+
+            scraper = _load_scraper(indeed_cfg.module, indeed_cfg, settings.profile, db)
+            enriched = 0
+
+            async with scraper:
+                for job in jobs:
+                    if job.id is None:
+                        continue
+                    console.print(f"  Enriching #{job.id}: {job.title}...", end="")
+
+                    from app.scrapers.indeed import IndeedScraper
+                    if isinstance(scraper, IndeedScraper):
+                        enriched_job = await scraper.enrich_job(job)
+                    else:
+                        console.print(" [yellow]skip (not Indeed)[/yellow]")
+                        continue
+
+                    if enriched_job.description and len(enriched_job.description) > len(job.description or ""):
+                        await db.conn.execute(
+                            "UPDATE jobs SET description = ?, raw_html = ? WHERE id = ?",
+                            (enriched_job.description, enriched_job.raw_html, job.id),
+                        )
+                        await db.conn.commit()
+                        enriched += 1
+                        desc_len = len(enriched_job.description)
+                        console.print(f" [green]OK ({desc_len} chars)[/green]")
+                    else:
+                        console.print(f" [yellow]no description found[/yellow]")
+
+                    await scraper.random_delay()
+
+            console.print(f"\n[bold green]Enriched {enriched}/{len(jobs)} jobs[/bold green]")
+
+    asyncio.run(_run())
+
+
+# ------------------------------------------------------------------
 # evaluate command
 # ------------------------------------------------------------------
 
