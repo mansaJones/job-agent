@@ -1,10 +1,11 @@
 """CLI entry point — Typer-based command interface for the job agent.
 
 Commands:
-    scrape   — Run scraper(s) once
-    list     — Browse saved job listings
-    status   — Show database stats
-    init-db  — Initialize/reset the database
+    scrape    — Run scraper(s) once
+    evaluate  — Score new jobs with the local LLM
+    list      — Browse saved job listings
+    status    — Show database stats
+    init-db   — Initialize/reset the database
 """
 
 from __future__ import annotations
@@ -118,6 +119,118 @@ def _load_scraper(module_path: str, board_cfg, profile, db) -> BaseScraper:  # t
 
 
 # ------------------------------------------------------------------
+# evaluate command
+# ------------------------------------------------------------------
+
+@app.command()
+def evaluate(
+    limit: int = typer.Option(
+        100, "--limit", "-n",
+        help="Max number of jobs to evaluate.",
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
+        help="Ollama model to use (default: llama3.1:8b-instruct-q4_K_M).",
+    ),
+    job_id: Optional[int] = typer.Option(
+        None, "--id",
+        help="Evaluate a single job by ID (useful for testing).",
+    ),
+) -> None:
+    """Score unevaluated jobs against your profile using the local LLM."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        from app.evaluator.ollama_client import OllamaClient, OllamaError
+        from app.evaluator.pipeline import EvaluationPipeline
+
+        ollama_url = settings.secrets.ollama_base_url or "http://localhost:11434"
+        model_name = model or "llama3.1:8b-instruct-q4_K_M"
+
+        async with Database(settings.db_path) as db:
+            async with OllamaClient(base_url=ollama_url, model=model_name) as ollama:
+                # Health check
+                if not await ollama.is_healthy():
+                    console.print(
+                        f"[red]Cannot reach Ollama at {ollama_url}[/red]\n"
+                        f"Make sure Ollama is running: [bold]ollama serve[/bold]"
+                    )
+                    raise typer.Exit(1)
+
+                available = await ollama.list_models()
+                if not await ollama.model_available():
+                    console.print(f"[red]Model '{model_name}' not found.[/red]")
+                    console.print(f"Available models: {', '.join(available) or 'none'}")
+                    console.print(f"Pull it with: [bold]ollama pull {model_name}[/bold]")
+                    raise typer.Exit(1)
+
+                console.print(f"[bold cyan]Evaluating with model: {model_name}[/bold cyan]")
+
+                pipeline = EvaluationPipeline(db, ollama, settings.profile)
+
+                # Single job mode
+                if job_id is not None:
+                    job = await db.get_job(job_id)
+                    if job is None:
+                        console.print(f"[red]No job with ID {job_id}[/red]")
+                        return
+
+                    console.print(f"Evaluating: [bold]{job.title}[/bold] at {job.company}")
+                    result = await pipeline.evaluate_job(job)
+
+                    if result is None:
+                        console.print("[red]Evaluation failed — check logs[/red]")
+                        return
+
+                    _print_eval_result(job, result)
+                    return
+
+                # Batch mode
+                new_count = await db.count_jobs(status="new")
+                if new_count == 0:
+                    console.print("[yellow]No new jobs to evaluate.[/yellow]")
+                    return
+
+                console.print(f"Found [bold]{new_count}[/bold] unevaluated jobs (processing up to {limit})")
+
+                try:
+                    stats = await pipeline.run(limit=limit)
+                except OllamaError as e:
+                    console.print(f"[red]Evaluation failed: {e}[/red]")
+                    raise typer.Exit(1)
+
+                console.print(f"\n[green]{stats.summary()}[/green]")
+
+                # Show breakdown
+                db_stats = await db.get_stats()
+                console.print(f"\n[bold]Database totals:[/bold] {db_stats}")
+
+    asyncio.run(_run())
+
+
+def _print_eval_result(job, result) -> None:  # type: ignore[no-untyped-def]
+    """Pretty-print a single evaluation result."""
+    from app.evaluator.pipeline import EvalResult
+
+    # Color the score
+    score = result.score
+    if score >= 0.7:
+        score_style = "bold green"
+    elif score >= 0.4:
+        score_style = "bold yellow"
+    else:
+        score_style = "bold red"
+
+    console.print(f"\n  [{score_style}]Score: {score:.2f}[/{score_style}]")
+    console.print(f"  [dim]Reasoning:[/dim] {result.reasoning}")
+
+    if result.highlights:
+        console.print(f"  [green]Highlights:[/green] {', '.join(result.highlights)}")
+    if result.red_flags:
+        console.print(f"  [red]Red flags:[/red] {', '.join(result.red_flags)}")
+
+
+# ------------------------------------------------------------------
 # list command
 # ------------------------------------------------------------------
 
@@ -166,6 +279,21 @@ def list_jobs(
                 console.print(f"  [green]Scraped:[/green]  {job.date_scraped or 'N/A'}")
                 console.print(f"  [green]URL:[/green]      {job.url}")
 
+                # Show evaluation if exists
+                evaluation = await db.get_evaluation(job.id)  # type: ignore[arg-type]
+                if evaluation:
+                    s = evaluation.match_score or 0.0
+                    if s >= 0.7:
+                        score_style = "bold green"
+                    elif s >= 0.4:
+                        score_style = "bold yellow"
+                    else:
+                        score_style = "bold red"
+                    console.print(f"  [{score_style}]Score:    {s:.2f}[/{score_style}]")
+                    console.print(f"  [green]Model:[/green]    {evaluation.model_used}")
+                    if evaluation.reasoning:
+                        console.print(f"  [green]Reasoning:[/green] {evaluation.reasoning}")
+
                 if job.description:
                     console.print(f"\n[bold]Description:[/bold]")
                     console.print(job.description[:2000])
@@ -197,8 +325,8 @@ def list_jobs(
             table.add_column("Company", max_width=20)
             table.add_column("Location", max_width=18)
             table.add_column("Salary", justify="right", max_width=14)
+            table.add_column("Score", justify="right", width=6)
             table.add_column("Status", style="cyan", width=10)
-            table.add_column("Posted", width=12)
 
             for row in rows:
                 row_dict = dict(row)
@@ -210,14 +338,31 @@ def list_jobs(
                     s_max = f"${row_dict['salary_max']/1000:.0f}k" if row_dict.get("salary_max") else "?"
                     sal = f"{s_min}–{s_max}"
 
+                # Get eval score if exists
+                score_str = ""
+                eval_row = await db.conn.execute(
+                    "SELECT match_score FROM evaluations WHERE job_id = ? "
+                    "ORDER BY evaluated_at DESC LIMIT 1",
+                    (row_dict["id"],),
+                )
+                eval_data = await eval_row.fetchone()
+                if eval_data and eval_data[0] is not None:
+                    s = eval_data[0]
+                    if s >= 0.7:
+                        score_str = f"[green]{s:.2f}[/green]"
+                    elif s >= 0.4:
+                        score_str = f"[yellow]{s:.2f}[/yellow]"
+                    else:
+                        score_str = f"[red]{s:.2f}[/red]"
+
                 table.add_row(
                     str(row_dict["id"]),
                     row_dict.get("title", ""),
                     row_dict.get("company", "") or "",
                     row_dict.get("location", "") or "",
                     sal,
+                    score_str,
                     row_dict.get("status", ""),
-                    row_dict.get("date_posted", "") or "",
                 )
 
             console.print(table)

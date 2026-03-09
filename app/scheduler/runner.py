@@ -1,7 +1,7 @@
-"""Scheduler runner — orchestrates periodic scraping using APScheduler.
+"""Scheduler runner — orchestrates periodic scraping and evaluation.
 
-This is the long-running process that kicks off scrape jobs on a schedule.
-Run it via: python -m app.scheduler.runner
+This is the long-running process that kicks off scrape and eval jobs
+on a schedule. Run it via: python -m app.scheduler.runner
 """
 
 from __future__ import annotations
@@ -17,14 +17,16 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import LOGS_DIR, load_settings, AppSettings
 from app.database import Database
+from app.evaluator.ollama_client import OllamaClient
+from app.evaluator.pipeline import EvaluationPipeline
 from app.logging_config import setup_logging
 from app.scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 
 
-class ScraperRunner:
-    """Manages scheduled scraping runs."""
+class AgentRunner:
+    """Manages scheduled scraping and evaluation runs."""
 
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
@@ -62,15 +64,41 @@ class ScraperRunner:
                 except Exception as e:
                     logger.error("Scraper %s failed: %s", name, e, exc_info=True)
 
-            stats = await db.get_stats()
-            logger.info("Post-scrape DB stats: %s", stats)
+            db_stats = await db.get_stats()
+            logger.info("Post-scrape DB stats: %s", db_stats)
+
+    async def run_evaluations(self) -> None:
+        """Evaluate all unevaluated jobs using the local LLM."""
+        logger.info("Scheduled evaluation run starting at %s", datetime.now(timezone.utc).isoformat())
+
+        ollama_url = self.settings.secrets.ollama_base_url or "http://localhost:11434"
+
+        async with Database(self.settings.db_path) as db:
+            async with OllamaClient(base_url=ollama_url) as ollama:
+                if not await ollama.is_healthy():
+                    logger.error("Ollama not reachable at %s — skipping evaluation", ollama_url)
+                    return
+
+                pipeline = EvaluationPipeline(db, ollama, self.settings.profile)
+
+                try:
+                    stats = await pipeline.run(limit=100)
+                    logger.info("Evaluation complete — %s", stats.summary())
+                except Exception as e:
+                    logger.error("Evaluation failed: %s", e, exc_info=True)
+
+    async def scrape_then_evaluate(self) -> None:
+        """Run scrapers first, then evaluate new jobs — the full nightly pipeline."""
+        await self.run_all_scrapers()
+        await self.run_evaluations()
 
     def setup_schedule(self) -> None:
         """Configure the APScheduler jobs.
 
-        Default schedule:
-          - Full scrape every 6 hours during business days
-          - Light scrape at 2am daily (off-peak, best for evaluation batch)
+        Schedule:
+          - Full scrape every 6 hours on weekdays
+          - Nightly scrape + evaluation at 2am daily (off-peak for LLM batch)
+          - Standalone evaluation at 3am (catch any stragglers)
         """
         # Main scrape — every 6 hours on weekdays
         self.scheduler.add_job(
@@ -81,12 +109,21 @@ class ScraperRunner:
             replace_existing=True,
         )
 
-        # Off-peak scrape — daily at 2am
+        # Nightly full pipeline — scrape + evaluate at 2am
         self.scheduler.add_job(
-            self.run_all_scrapers,
+            self.scrape_then_evaluate,
             CronTrigger(hour=2, minute=0),
-            id="scrape_nightly",
-            name="Nightly scrape (2am)",
+            id="nightly_pipeline",
+            name="Nightly scrape + evaluate (2am)",
+            replace_existing=True,
+        )
+
+        # Catch-up evaluation — 3am (in case daytime scrapes left unevaluated jobs)
+        self.scheduler.add_job(
+            self.run_evaluations,
+            CronTrigger(hour=3, minute=30),
+            id="eval_catchup",
+            name="Evaluation catch-up (3:30am)",
             replace_existing=True,
         )
 
@@ -120,11 +157,11 @@ async def main() -> None:
     settings = load_settings()
     setup_logging(LOGS_DIR, settings.log_level)
 
-    runner = ScraperRunner(settings)
+    runner = AgentRunner(settings)
 
-    # Run once immediately on startup, then hand off to schedule
-    logger.info("Running initial scrape on startup...")
-    await runner.run_all_scrapers()
+    # Run full pipeline once on startup, then hand off to schedule
+    logger.info("Running initial scrape + evaluate on startup...")
+    await runner.scrape_then_evaluate()
 
     await runner.start()
 
