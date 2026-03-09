@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} — Job Agent{% endblock %}
+
+{% block content %}
+<div style="padding-top: 1rem;">
+    <a href="/jobs" class="btn btn-ghost btn-sm" style="margin-bottom: 1rem;">&larr; Back to jobs</a>
+</div>
+
+<div class="detail-header">
+    <h1>{{ job.title }}</h1>
+    <div class="detail-meta">
+        <span>{{ job.company or 'Unknown Company' }}</span>
+        <span>{{ job.location or 'Location N/A' }}</span>
+        <span>{{ format_salary(job.salary_min, job.salary_max) }}</span>
+        {% if job.eval_score is not none %}
+        <span class="score {{ score_color(job.eval_score) }}">{{ "%.2f"|format(job.eval_score) }}</span>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Decision actions -->
+<div id="decision-area" style="margin-bottom: 1.5rem;">
+    {% include "partials/decision_badge.html" %}
+</div>
+
+<div class="detail-grid">
+    <!-- Left column: Description -->
+    <div>
+        <div class="card">
+            <h2>Description</h2>
+            {% if job.description %}
+            <div class="detail-description">{{ job.description }}</div>
+            {% else %}
+            <div class="empty-state" style="padding: 1.5rem;">
+                <p>No description available.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Right column: Evaluation + Meta -->
+    <div>
+        <!-- Evaluation -->
+        {% if job.eval_score is not none %}
+        <div class="card">
+            <h2>Evaluation</h2>
+            <div class="eval-breakdown">
+                <div class="eval-item">
+                    <div class="label">Score</div>
+                    <div class="value">
+                        <span class="score {{ score_color(job.eval_score) }}" style="font-size: 1.25rem;">
+                            {{ "%.2f"|format(job.eval_score) }}
+                        </span>
+                    </div>
+                </div>
+
+                {% if job.eval_reasoning %}
+                <div class="eval-item">
+                    <div class="label">Reasoning</div>
+                    <div class="value">{{ job.eval_reasoning }}</div>
+                </div>
+                {% endif %}
+
+                {% if job.eval_model %}
+                <div class="eval-item">
+                    <div class="label">Model</div>
+                    <div class="value" style="color: var(--text-muted);">{{ job.eval_model }}</div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Rejection reason -->
+        {% if job.rejection_reason %}
+        <div class="card" style="border-color: var(--red);">
+            <h2 style="color: var(--red);">Rejection Reason</h2>
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">{{ job.rejection_reason }}</p>
+        </div>
+        {% endif %}
+
+        <!-- Job meta -->
+        <div class="card">
+            <h2>Details</h2>
+            <div class="eval-breakdown">
+                <div class="eval-item">
+                    <div class="label">Source</div>
+                    <div class="value">{{ job.source }}</div>
+                </div>
+                <div class="eval-item">
+                    <div class="label">Posted</div>
+                    <div class="value">{{ job.date_posted or 'Unknown' }}</div>
+                </div>
+                <div class="eval-item">
+                    <div class="label">Scraped</div>
+                    <div class="value">{{ job.date_scraped or 'Unknown' }}</div>
+                </div>
+                <div class="eval-item">
+                    <div class="label">Original Listing</div>
+                    <div class="value"><a href="{{ job.url }}" target="_blank" rel="noopener">View on {{ job.source }} &nearr;</a></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% if jobs %}
+<div class="card">
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Company</th>
+                    <th>Location</th>
+                    <th>Salary</th>
+                    <th>Score</th>
+                    <th>Status</th>
+                    <th>Reason</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in jobs %}
+                <tr>
+                    <td><a href="/jobs/{{ job.id }}" class="job-title-link">{{ job.title }}</a></td>
+                    <td class="company-text">{{ job.company or 'N/A' }}</td>
+                    <td>{{ job.location or 'N/A' }}</td>
+                    <td>{{ format_salary(job.salary_min, job.salary_max) }}</td>
+                    <td>
+                        {% if job.eval_score is not none %}
+                        <span class="score {{ score_color(job.eval_score) }}">{{ "%.2f"|format(job.eval_score) }}</span>
+                        {% else %}
+                        <span class="score neutral">&mdash;</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if job.status == 'evaluated' %}
+                        <span class="badge badge-green">review</span>
+                        {% elif job.status == 'maybe' %}
+                        <span class="badge badge-yellow">maybe</span>
+                        {% elif job.status == 'approved' %}
+                        <span class="badge badge-green">approved</span>
+                        {% elif job.status == 'rejected' %}
+                        <span class="badge badge-red">rejected</span>
+                        {% elif job.status == 'applied' %}
+                        <span class="badge badge-blue">applied</span>
+                        {% else %}
+                        <span class="badge badge-neutral">{{ job.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="reason-text" title="{{ job.rejection_reason or '' }}">
+                        {{ (job.rejection_reason or '')[:50] }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Pagination -->
+{% if total_pages > 1 %}
+<div class="pagination">
+    {% if page > 1 %}
+    <a href="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page - 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+       hx-get="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page - 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+       hx-target="#job-list"
+       hx-push-url="true">&laquo; Prev</a>
+    {% endif %}
+
+    <span class="current">{{ page }} / {{ total_pages }}</span>
+
+    {% if page < total_pages %}
+    <a href="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page + 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+       hx-get="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page + 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+       hx-target="#job-list"
+       hx-push-url="true">Next &raquo;</a>
+    {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="empty-state">
+    <h3>No jobs found</h3>
+    <p>{% if current_status %}No jobs with status "{{ current_status }}".{% else %}Run a scrape to find jobs.{% endif %}</p>
+</div>
+{% endif %}

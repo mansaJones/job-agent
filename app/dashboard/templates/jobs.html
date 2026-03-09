@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Jobs — Job Agent{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Jobs <span style="color: var(--text-muted); font-weight: 400; font-size: 1rem;">({{ total }})</span></h1>
+</div>
+
+<!-- Status filter tabs -->
+<div class="filter-tabs">
+    <a href="/jobs"
+       class="filter-tab {% if not current_status %}active{% endif %}"
+       hx-get="/jobs"
+       hx-target="#job-list"
+       hx-push-url="true">
+        All <span class="count">{{ stats.get('total', 0) }}</span>
+    </a>
+    <a href="/jobs?status=evaluated&sort=eval_score&dir=DESC"
+       class="filter-tab {% if current_status == 'evaluated' %}active{% endif %}"
+       hx-get="/jobs?status=evaluated&sort=eval_score&dir=DESC"
+       hx-target="#job-list"
+       hx-push-url="true">
+        Review <span class="count">{{ stats.get('evaluated', 0) }}</span>
+    </a>
+    <a href="/jobs?status=maybe&sort=eval_score&dir=DESC"
+       class="filter-tab {% if current_status == 'maybe' %}active{% endif %}"
+       hx-get="/jobs?status=maybe&sort=eval_score&dir=DESC"
+       hx-target="#job-list"
+       hx-push-url="true">
+        Maybe <span class="count">{{ stats.get('maybe', 0) }}</span>
+    </a>
+    <a href="/jobs?status=approved"
+       class="filter-tab {% if current_status == 'approved' %}active{% endif %}"
+       hx-get="/jobs?status=approved"
+       hx-target="#job-list"
+       hx-push-url="true">
+        Approved <span class="count">{{ stats.get('approved', 0) }}</span>
+    </a>
+    <a href="/jobs?status=rejected"
+       class="filter-tab {% if current_status == 'rejected' %}active{% endif %}"
+       hx-get="/jobs?status=rejected"
+       hx-target="#job-list"
+       hx-push-url="true">
+        Rejected <span class="count">{{ stats.get('rejected', 0) }}</span>
+    </a>
+    <a href="/jobs?status=new"
+       class="filter-tab {% if current_status == 'new' %}active{% endif %}"
+       hx-get="/jobs?status=new"
+       hx-target="#job-list"
+       hx-push-url="true">
+        New <span class="count">{{ stats.get('new', 0) }}</span>
+    </a>
+</div>
+
+<!-- Job table -->
+<div id="job-list">
+    {% include "partials/job_table.html" %}
+</div>
+{% endblock %}

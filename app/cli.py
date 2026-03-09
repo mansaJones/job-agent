@@ -498,6 +498,31 @@ def init_db() -> None:
 
 
 # ------------------------------------------------------------------
+# dashboard command
+# ------------------------------------------------------------------
+
+@app.command()
+def dashboard(
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Bind address."),
+    port: int = typer.Option(8080, "--port", "-p", help="Port to listen on."),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (dev only)."),
+) -> None:
+    """Start the web dashboard (FastAPI + HTMX)."""
+    _get_settings()  # validate config + init logging
+    console.print(f"[bold cyan]Starting dashboard at http://{host}:{port}[/bold cyan]")
+    console.print("[dim]Press Ctrl+C to stop[/dim]")
+
+    import uvicorn
+    uvicorn.run(
+        "app.dashboard.main:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
+
+
+# ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
 

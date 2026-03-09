@@ -1,0 +1,41 @@
+{% if job.status == 'approved' %}
+<div class="btn-group">
+    <span class="badge badge-green" style="font-size: 0.9rem; padding: 0.4rem 1rem;">Approved</span>
+    <button class="btn btn-yellow btn-sm"
+            hx-post="/api/jobs/{{ job.id }}/decide"
+            hx-vals='{"decision": "maybe", "notes": ""}'
+            hx-target="#decision-area"
+            hx-swap="innerHTML">Change to Maybe</button>
+</div>
+{% elif job.status == 'applied' %}
+<div class="btn-group">
+    <span class="badge badge-blue" style="font-size: 0.9rem; padding: 0.4rem 1rem;">Applied</span>
+</div>
+{% else %}
+<div class="btn-group">
+    <button class="btn btn-green btn-sm"
+            hx-post="/api/jobs/{{ job.id }}/decide"
+            hx-vals='{"decision": "approved", "notes": ""}'
+            hx-target="#decision-area"
+            hx-swap="innerHTML">Approve</button>
+    <button class="btn btn-yellow btn-sm"
+            hx-post="/api/jobs/{{ job.id }}/decide"
+            hx-vals='{"decision": "maybe", "notes": ""}'
+            hx-target="#decision-area"
+            hx-swap="innerHTML">Maybe</button>
+    <button class="btn btn-red btn-sm"
+            hx-post="/api/jobs/{{ job.id }}/decide"
+            hx-vals='{"decision": "rejected", "notes": ""}'
+            hx-target="#decision-area"
+            hx-swap="innerHTML">Reject</button>
+
+    {% if job.status in ('evaluated', 'maybe', 'new') %}
+    <span class="badge badge-{% if job.status == 'evaluated' %}green{% elif job.status == 'maybe' %}yellow{% else %}neutral{% endif %}"
+          style="margin-left: 0.5rem;">
+        {{ job.status }}
+    </span>
+    {% elif job.status == 'rejected' %}
+    <span class="badge badge-red" style="margin-left: 0.5rem;">rejected</span>
+    {% endif %}
+</div>
+{% endif %}

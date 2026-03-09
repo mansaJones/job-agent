@@ -52,6 +52,10 @@ job-agent list --id 5                # full detail for job #5
 │   ├── evaluator/
 │   │   ├── ollama_client.py   # Async Ollama HTTP client
 │   │   └── pipeline.py        # LLM evaluation pipeline + auto-filtering
+│   ├── dashboard/
+│   │   ├── main.py            # FastAPI app + routes
+│   │   ├── static/style.css   # Dark theme CSS
+│   │   └── templates/         # Jinja2 + HTMX templates
 │   └── scheduler/
 │       └── runner.py          # APScheduler orchestration
 ├── config/
@@ -153,6 +157,8 @@ boards:
 | `job-agent list --status evaluated` | Show only top matches |
 | `job-agent list --status rejected` | Show rejected jobs with reasons |
 | `job-agent list --id 5` | Full detail view for a job |
+| `job-agent dashboard` | Start the web dashboard on port 8080 |
+| `job-agent dashboard --port 3000` | Start on a custom port |
 | `job-agent status` | Database stats by status |
 
 ## Evaluation Scoring
@@ -184,6 +190,47 @@ The 8GB shared RAM is tight. Key setup decisions:
 # /etc/systemd/system/ollama.service
 [Service]
 Environment="CUDA_VISIBLE_DEVICES="
+```
+
+## Web Dashboard
+
+Phase 3 adds a web UI accessible from any device on your LAN (phone, laptop, etc.).
+
+```bash
+# Start the dashboard
+source ~/agent/venv/bin/activate
+job-agent dashboard
+
+# Access from any device on your network:
+# http://192.168.5.58:8080
+```
+
+Features: dark theme, mobile-responsive, HTMX-powered (no JS build step). Pages include a dashboard home with stats and top matches, a filterable job list with status tabs, and job detail pages with approve/reject/maybe buttons. You can also trigger scrape and evaluation runs directly from the dashboard.
+
+### Running as a systemd service
+
+```ini
+# /etc/systemd/system/job-agent-dashboard.service
+[Unit]
+Description=Job Agent Dashboard
+After=network.target ollama.service
+
+[Service]
+Type=simple
+User=geechiedan68
+WorkingDirectory=/home/geechiedan68/agent
+ExecStart=/home/geechiedan68/agent/venv/bin/job-agent dashboard
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo cp job-agent-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now job-agent-dashboard
 ```
 
 ## Scheduler (Automated Operation)
@@ -219,13 +266,13 @@ python tests/test_core.py
 
 - [x] **Phase 1** — Scaffolding, database, config system, Indeed scraper
 - [x] **Phase 2** — Local LLM evaluation pipeline with auto-filtering
-- [ ] **Phase 3** — FastAPI dashboard + Telegram notifications
+- [x] **Phase 3** — FastAPI + HTMX web dashboard (Telegram deferred)
 - [ ] **Phase 4** — Cloud API cover letter polishing (Anthropic Claude)
 - [ ] **Phase 5** — Additional scrapers (Dice, LinkedIn, remote boards) + hardening
 - [ ] **Phase 6** — Analytics, outcome tracking, continuous improvement
 
 ## Dependencies
 
-Core: `httpx[http2]`, `beautifulsoup4`, `lxml`, `aiosqlite`, `pydantic`, `pydantic-settings`, `typer`, `rich`, `pyyaml`, `apscheduler`, `playwright`
+Core: `httpx[http2]`, `beautifulsoup4`, `lxml`, `aiosqlite`, `pydantic`, `pydantic-settings`, `typer`, `rich`, `pyyaml`, `apscheduler`, `fastapi`, `uvicorn`, `jinja2`, `playwright`
 
 See `pyproject.toml` for the full list.

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Job Agent{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <div class="btn-group">
+        <button class="btn btn-primary btn-sm"
+                hx-post="/api/scrape"
+                hx-swap="outerHTML"
+                {% if running_tasks.scrape %}disabled{% endif %}>
+            {% if running_tasks.scrape %}Scraping...{% else %}Run Scrape{% endif %}
+        </button>
+        <button class="btn btn-ghost btn-sm"
+                hx-post="/api/evaluate"
+                hx-swap="outerHTML"
+                {% if running_tasks.evaluate %}disabled{% endif %}>
+            {% if running_tasks.evaluate %}Evaluating...{% else %}Run Evaluation{% endif %}
+        </button>
+    </div>
+</div>
+
+<!-- Stats -->
+<div class="stats-grid">
+    <div class="stat-card blue">
+        <div class="stat-value">{{ stats.get('total', 0) }}</div>
+        <div class="stat-label">Total Jobs</div>
+    </div>
+    <div class="stat-card green">
+        <div class="stat-value">{{ stats.get('evaluated', 0) }}</div>
+        <div class="stat-label">Ready to Review</div>
+    </div>
+    <div class="stat-card yellow">
+        <div class="stat-value">{{ stats.get('maybe', 0) }}</div>
+        <div class="stat-label">Maybe</div>
+    </div>
+    <div class="stat-card red">
+        <div class="stat-value">{{ stats.get('rejected', 0) }}</div>
+        <div class="stat-label">Rejected</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.get('approved', 0) }}</div>
+        <div class="stat-label">Approved</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.get('applied', 0) }}</div>
+        <div class="stat-label">Applied</div>
+    </div>
+</div>
+
+<!-- Top Matches -->
+<div class="card">
+    <h2>Top Matches</h2>
+    {% if top_matches %}
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Company</th>
+                    <th>Location</th>
+                    <th>Salary</th>
+                    <th>Score</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in top_matches %}
+                <tr>
+                    <td><a href="/jobs/{{ job.id }}" class="job-title-link">{{ job.title }}</a></td>
+                    <td class="company-text">{{ job.company or 'N/A' }}</td>
+                    <td>{{ job.location or 'N/A' }}</td>
+                    <td>{{ format_salary(job.salary_min, job.salary_max) }}</td>
+                    <td>
+                        {% if job.eval_score is not none %}
+                        <span class="score {{ score_color(job.eval_score) }}">{{ "%.2f"|format(job.eval_score) }}</span>
+                        {% else %}
+                        <span class="score neutral">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if top_matches|length > 0 %}
+    <div style="text-align: right; margin-top: 0.75rem;">
+        <a href="/jobs?status=evaluated&sort=eval_score&dir=DESC" class="btn btn-ghost btn-sm">View all matches &rarr;</a>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="empty-state">
+        <h3>No matches yet</h3>
+        <p>Run a scrape and evaluation to find job matches.</p>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Maybes -->
+{% if recent_maybes %}
+<div class="card">
+    <h2>Worth a Look</h2>
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Company</th>
+                    <th>Location</th>
+                    <th>Score</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for job in recent_maybes %}
+                <tr>
+                    <td><a href="/jobs/{{ job.id }}" class="job-title-link">{{ job.title }}</a></td>
+                    <td class="company-text">{{ job.company or 'N/A' }}</td>
+                    <td>{{ job.location or 'N/A' }}</td>
+                    <td>
+                        {% if job.eval_score is not none %}
+                        <span class="score {{ score_color(job.eval_score) }}">{{ "%.2f"|format(job.eval_score) }}</span>
+                        {% else %}
+                        <span class="score neutral">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div style="text-align: right; margin-top: 0.75rem;">
+        <a href="/jobs?status=maybe&sort=eval_score&dir=DESC" class="btn btn-ghost btn-sm">View all maybes &rarr;</a>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

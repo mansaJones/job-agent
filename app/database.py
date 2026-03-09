@@ -369,3 +369,79 @@ class Database:
         stats = {row["status"]: row["cnt"] for row in rows}
         stats["total"] = sum(stats.values())
         return stats
+
+    # ------------------------------------------------------------------
+    # Dashboard queries
+    # ------------------------------------------------------------------
+
+    async def get_jobs_paginated(
+        self,
+        status: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        sort_by: str = "date_scraped",
+        sort_dir: str = "DESC",
+    ) -> tuple[list[dict], int]:
+        """Fetch jobs with evaluation data, paginated. Returns (rows, total_count).
+
+        Each row is a dict with all job fields plus eval_score and eval_reasoning.
+        """
+        # Whitelist sort columns to prevent injection
+        allowed_sorts = {
+            "date_scraped", "title", "company", "status", "eval_score",
+        }
+        if sort_by not in allowed_sorts:
+            sort_by = "date_scraped"
+        if sort_dir.upper() not in ("ASC", "DESC"):
+            sort_dir = "DESC"
+
+        where_clause = "WHERE j.status = ?" if status else ""
+        params: list = [status] if status else []
+
+        # Total count
+        count_sql = f"SELECT COUNT(*) FROM jobs j {where_clause}"
+        cursor = await self.conn.execute(count_sql, params)
+        row = await cursor.fetchone()
+        total = row[0] if row else 0
+
+        # Handle eval_score sort (it's from the join)
+        order_col = "e.match_score" if sort_by == "eval_score" else f"j.{sort_by}"
+
+        query = f"""
+            SELECT j.*,
+                   e.match_score AS eval_score,
+                   e.reasoning AS eval_reasoning,
+                   e.model_used AS eval_model
+            FROM jobs j
+            LEFT JOIN evaluations e ON e.job_id = j.id
+                AND e.evaluated_at = (
+                    SELECT MAX(e2.evaluated_at) FROM evaluations e2 WHERE e2.job_id = j.id
+                )
+            {where_clause}
+            ORDER BY {order_col} {sort_dir}
+            LIMIT ? OFFSET ?
+        """
+        cursor = await self.conn.execute(query, params + [limit, offset])
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows], total
+
+    async def get_job_with_evaluation(self, job_id: int) -> dict | None:
+        """Fetch a single job with its latest evaluation data."""
+        cursor = await self.conn.execute(
+            """
+            SELECT j.*,
+                   e.match_score AS eval_score,
+                   e.reasoning AS eval_reasoning,
+                   e.model_used AS eval_model,
+                   e.evaluated_at AS eval_date
+            FROM jobs j
+            LEFT JOIN evaluations e ON e.job_id = j.id
+                AND e.evaluated_at = (
+                    SELECT MAX(e2.evaluated_at) FROM evaluations e2 WHERE e2.job_id = j.id
+                )
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
