@@ -58,18 +58,19 @@ You MUST respond with valid JSON only. No markdown, no explanation outside the J
 
 EVAL_PROMPT_TEMPLATE = """Score how well this job matches the candidate profile from 0.0 to 1.0.
 
-Consider:
-- Role/title alignment with target roles
-- Required skills overlap with candidate's must-have and nice-to-have skills
-- Location and remote work compatibility
-- Salary expectations (candidate minimum: ${salary_min:,}/year)
-- Experience level match ({experience_years} years of experience)
-- Any red flags (blacklisted keywords, unrealistic requirements, etc.)
+SCORING RULES (follow these exactly):
+- The candidate does NOT need ALL must-have skills. Matching even ONE must-have skill is a positive signal.
+- A job matching 2-3 must-have skills is a strong match (0.6+). Matching 4+ is excellent (0.8+).
+- Nice-to-have skills are bonus points, not requirements.
+- Role/title alignment: if the job title is similar to ANY target role, that's a strong positive.
+- Remote/hybrid jobs should score well if remote_ok or hybrid_ok is True.
+- If salary is not listed, do NOT penalize the score — treat it as neutral.
+- Only give scores below 0.3 for jobs that are clearly irrelevant (wrong field entirely, junior when candidate is senior, etc.)
 
 CANDIDATE PROFILE:
 Target Roles: {target_roles}
-Must-Have Skills: {must_have_skills}
-Nice-to-Have Skills: {nice_to_have_skills}
+Core Skills (match on ANY, not all): {must_have_skills}
+Bonus Skills: {nice_to_have_skills}
 Location: {location}
 Remote OK: {remote_ok} | Hybrid OK: {hybrid_ok} | Onsite OK: {onsite_ok}
 Max Commute: {max_commute_miles} miles
@@ -272,7 +273,20 @@ class EvaluationPipeline:
 
         # Update job status based on score
         new_status = self._classify(result.score)
-        await self.db.update_job_status(job.id, new_status)  # type: ignore[arg-type]
+
+        # Build rejection reason for rejected jobs so we know why
+        rejection_reason = None
+        if new_status == "rejected":
+            parts = [f"Score {result.score:.2f}"]
+            if result.reasoning:
+                parts.append(result.reasoning)
+            if result.red_flags:
+                parts.append(f"Red flags: {', '.join(result.red_flags)}")
+            rejection_reason = " | ".join(parts)
+
+        await self.db.update_job_status(
+            job.id, new_status, rejection_reason=rejection_reason  # type: ignore[arg-type]
+        )
 
         logger.info(
             "Job #%d [%s @ %s] → score=%.2f status=%s",

@@ -175,11 +175,39 @@ def load_secrets() -> SecretsConfig:
     return SecretsConfig()
 
 
+def _resolve_board_defaults(boards: BoardsConfig, profile: ProfileConfig) -> None:
+    """Fill in board-level gaps from profile — profile.yaml is the single source of truth.
+
+    Rules:
+      - If a board has no search_queries → generate from profile.target_roles (lowercased)
+      - If a board has no location → use profile.preferences.location
+      - If a board has no radius_miles (0) → use profile.preferences.max_commute_miles
+    """
+    for board in boards.boards.values():
+        if not board.search_queries:
+            board.search_queries = [r.lower() for r in profile.target_roles]
+            logger.debug("Board '%s': inherited %d search queries from profile",
+                         board.name, len(board.search_queries))
+
+        if not board.location:
+            board.location = profile.preferences.location
+            logger.debug("Board '%s': inherited location '%s' from profile",
+                         board.name, board.location)
+
+        if board.radius_miles == 0:
+            board.radius_miles = profile.preferences.max_commute_miles
+            logger.debug("Board '%s': inherited radius %d mi from profile",
+                         board.name, board.radius_miles)
+
+
 def load_settings() -> AppSettings:
     """Load the full application settings from all config sources."""
     profile = load_profile()
     boards = load_boards()
     secrets = load_secrets()
+
+    # Resolve shared defaults — profile is the single source of truth
+    _resolve_board_defaults(boards, profile)
 
     # Ensure critical directories exist
     for directory in [DATA_DIR, LOGS_DIR, HTML_SNAPSHOTS_DIR, DATA_DIR / "backups"]:

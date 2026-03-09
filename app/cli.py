@@ -352,6 +352,9 @@ def list_jobs(
                 console.print(f"  [green]Scraped:[/green]  {job.date_scraped or 'N/A'}")
                 console.print(f"  [green]URL:[/green]      {job.url}")
 
+                if job.rejection_reason:
+                    console.print(f"  [red]Rejected:[/red] {job.rejection_reason}")
+
                 # Show evaluation if exists
                 evaluation = await db.get_evaluation(job.id)  # type: ignore[arg-type]
                 if evaluation:
@@ -394,12 +397,13 @@ def list_jobs(
 
             table = Table(title=f"Job Listings ({len(rows)} shown)")
             table.add_column("ID", style="dim", justify="right", width=4)
-            table.add_column("Title", style="bold", max_width=35)
-            table.add_column("Company", max_width=20)
-            table.add_column("Location", max_width=18)
+            table.add_column("Title", style="bold", max_width=30)
+            table.add_column("Company", max_width=18)
+            table.add_column("Location", max_width=16)
             table.add_column("Salary", justify="right", max_width=14)
             table.add_column("Score", justify="right", width=6)
             table.add_column("Status", style="cyan", width=10)
+            table.add_column("Reason", style="dim", max_width=40)
 
             for row in rows:
                 row_dict = dict(row)
@@ -428,6 +432,11 @@ def list_jobs(
                     else:
                         score_str = f"[red]{s:.2f}[/red]"
 
+                # Rejection reason (truncate for table view)
+                reason = row_dict.get("rejection_reason", "") or ""
+                if len(reason) > 40:
+                    reason = reason[:37] + "..."
+
                 table.add_row(
                     str(row_dict["id"]),
                     row_dict.get("title", ""),
@@ -436,6 +445,7 @@ def list_jobs(
                     sal,
                     score_str,
                     row_dict.get("status", ""),
+                    reason,
                 )
 
             console.print(table)

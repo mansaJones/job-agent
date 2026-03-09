@@ -39,6 +39,7 @@ class JobRecord(BaseModel):
     date_posted: str | None = None
     date_scraped: str | None = None
     status: str = "new"
+    rejection_reason: str | None = None
 
 
 class EvaluationRecord(BaseModel):
@@ -92,7 +93,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     raw_html TEXT,
     date_posted TEXT,
     date_scraped TEXT DEFAULT (datetime('now')),
-    status TEXT DEFAULT 'new'
+    status TEXT DEFAULT 'new',
+    rejection_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS evaluations (
@@ -165,7 +167,24 @@ class Database:
 
         await self._conn.executescript(SCHEMA_SQL)
         await self._conn.commit()
+
+        # Migrations — add columns that may not exist in older DBs
+        await self._run_migrations()
+
         logger.info("Database initialized at %s (WAL mode)", self.db_path)
+
+    async def _run_migrations(self) -> None:
+        """Apply schema migrations for columns added after initial release."""
+        migrations = [
+            ("jobs", "rejection_reason", "ALTER TABLE jobs ADD COLUMN rejection_reason TEXT"),
+        ]
+        for table, column, ddl in migrations:
+            cursor = await self.conn.execute(f"PRAGMA table_info({table})")
+            columns = [row[1] for row in await cursor.fetchall()]
+            if column not in columns:
+                await self.conn.execute(ddl)
+                await self.conn.commit()
+                logger.info("Migration: added %s.%s", table, column)
 
     async def close(self) -> None:
         """Close the database connection."""
@@ -240,11 +259,19 @@ class Database:
         """Convenience: fetch jobs with status 'new'."""
         return await self.get_jobs_by_status("new", limit=limit)
 
-    async def update_job_status(self, job_id: int, status: str) -> None:
-        """Update the status of a job."""
-        await self.conn.execute(
-            "UPDATE jobs SET status = ? WHERE id = ?", (status, job_id)
-        )
+    async def update_job_status(
+        self, job_id: int, status: str, rejection_reason: str | None = None
+    ) -> None:
+        """Update the status of a job, optionally storing a rejection reason."""
+        if rejection_reason:
+            await self.conn.execute(
+                "UPDATE jobs SET status = ?, rejection_reason = ? WHERE id = ?",
+                (status, rejection_reason, job_id),
+            )
+        else:
+            await self.conn.execute(
+                "UPDATE jobs SET status = ? WHERE id = ?", (status, job_id)
+            )
         await self.conn.commit()
 
     async def job_url_exists(self, url: str) -> bool:

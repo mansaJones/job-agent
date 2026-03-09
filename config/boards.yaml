@@ -1,17 +1,18 @@
 # config/boards.yaml — Per-board scraper configuration
-# Each board gets its own search params and rate-limit settings.
+# Each board gets its own scraping params and rate-limit settings.
+#
+# Shared values (location, search_queries, radius) are inherited from
+# profile.yaml by default. You can override them per-board if needed.
+# If a field is omitted or empty, the profile value is used.
 
 boards:
   indeed:
     enabled: true
     module: "app.scrapers.indeed"
     base_url: "https://www.indeed.com"
-    search_queries:
-      - "lead frontend developer"
-      - "web development lead"
-      - "front end engineering manager"
-    location: "Country Club Hills, IL"
-    radius_miles: 25
+    # search_queries: inherited from profile.target_roles (lowercased)
+    # location: inherited from profile.preferences.location
+    # radius_miles: inherited from profile.preferences.max_commute_miles
     max_pages: 3
     delay_min: 10.0
     delay_max: 30.0
@@ -23,9 +24,11 @@ boards:
     enabled: false
     module: "app.scrapers.dice"
     base_url: "https://www.dice.com"
+    # Override search_queries for this board only (different role focus)
     search_queries:
       - "devops engineer"
       - "cloud engineer"
+    # Override location for this board only
     location: "Chicago, IL"
     radius_miles: 40
     max_pages: 3
