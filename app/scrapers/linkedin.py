@@ -136,9 +136,12 @@ class LinkedInScraper(BaseScraper):
             or card.select_one("a[class*='job-card']")
         )
 
-        # The link is usually on a separate <a> wrapping the card
+        # The link is usually on a separate <a> wrapping the card.
+        # data-tracking-control-name is the most stable selector — LinkedIn
+        # uses it for analytics and rarely changes it.
         link_el = (
             card.select_one("a.base-card__full-link")
+            or card.select_one("a[data-tracking-control-name='public_jobs_jserp-result_search-card']")
             or card.select_one("a[href*='/jobs/view/']")
             or card.select_one("a[data-tracking-control-name]")
         )
@@ -347,39 +350,203 @@ class LinkedInScraper(BaseScraper):
     ) -> tuple[str | None, float | None, float | None]:
         """Extract description and salary from a LinkedIn detail page.
 
+        Uses a 3-strategy approach in priority order:
+          1. JSON-LD structured data (most stable — LinkedIn rarely changes this)
+          2. Known CSS selectors for the guest API HTML
+          3. Broad fallback selectors + full-page text extraction
+
         Returns (description, salary_min, salary_max).
         """
         soup = BeautifulSoup(html, "lxml")
 
-        # --- Description ---
+        # ----------------------------------------------------------
+        # Strategy 1: JSON-LD structured data (most reliable)
+        # LinkedIn embeds <script type="application/ld+json"> with
+        # the full description in the "description" field.
+        # ----------------------------------------------------------
+        desc_from_ld, sal_min_ld, sal_max_ld = self._parse_from_jsonld(soup)
+        if desc_from_ld and len(desc_from_ld) > 100:
+            logger.debug("[linkedin] Description extracted via JSON-LD (%d chars)", len(desc_from_ld))
+            return desc_from_ld, sal_min_ld, sal_max_ld
+
+        # ----------------------------------------------------------
+        # Strategy 2: Known CSS selectors (guest API fragments)
+        # These class names are the most commonly seen as of early 2026.
+        # Ordered from most specific to least specific.
+        # ----------------------------------------------------------
         description = None
-        for selector in [
+        css_selectors = [
+            # Guest API detail endpoint — primary container
             "div.show-more-less-html__markup",
+            # Full page variants
+            "div.jobs-description-content__text",
+            "div.jobs-description__content",
             "div[class*='description__text']",
             "div.description__text",
+            "div.decorated-job-posting__details",
+            # ID-based selector (Selenium/Playwright rendered pages)
+            "#job-details",
+            # Section-level fallbacks
+            "section[class*='description'] div",
             "section[class*='description']",
             "div[class*='show-more-less']",
-            "article",
-        ]:
+        ]
+
+        for selector in css_selectors:
             el = soup.select_one(selector)
             if el:
                 text = el.get_text(separator="\n", strip=True)
                 if text and len(text) > 100:
                     description = text
+                    logger.debug("[linkedin] Description extracted via CSS '%s' (%d chars)",
+                                 selector, len(text))
                     break
+
+        # ----------------------------------------------------------
+        # Strategy 3: Broadest fallback — grab the largest text block
+        # If CSS selectors all miss (HTML structure changed), find the
+        # longest text-bearing element on the page as a heuristic.
+        # ----------------------------------------------------------
+        if not description:
+            description = self._extract_longest_text_block(soup)
+            if description:
+                logger.warning(
+                    "[linkedin] Description extracted via longest-text-block fallback "
+                    "(%d chars) — CSS selectors may need updating",
+                    len(description),
+                )
 
         # --- Salary from detail page ---
         salary_min, salary_max = None, None
-        salary_el = (
-            soup.select_one("div[class*='salary']")
-            or soup.select_one("span[class*='compensation']")
-        )
-        if salary_el:
-            salary_min, salary_max = self._parse_salary_text(
-                salary_el.get_text(strip=True)
-            )
+        salary_selectors = [
+            "div[class*='salary']",
+            "span[class*='compensation']",
+            "div[class*='compensation']",
+            "span[class*='salary']",
+            "li[class*='salary']",
+        ]
+        for sel in salary_selectors:
+            salary_el = soup.select_one(sel)
+            if salary_el:
+                salary_min, salary_max = self._parse_salary_text(
+                    salary_el.get_text(strip=True)
+                )
+                if salary_min or salary_max:
+                    break
 
         return description, salary_min, salary_max
+
+    def _parse_from_jsonld(
+        self, soup: BeautifulSoup
+    ) -> tuple[str | None, float | None, float | None]:
+        """Extract job data from JSON-LD structured data.
+
+        LinkedIn embeds <script type="application/ld+json"> containing
+        a JobPosting schema with description, salary, title, etc.
+        This is the most stable extraction method because structured
+        data formats change far less often than CSS class names.
+        """
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            # Handle both single object and array of objects
+            objects = data if isinstance(data, list) else [data]
+
+            for obj in objects:
+                if not isinstance(obj, dict):
+                    continue
+
+                # Look for JobPosting schema
+                obj_type = obj.get("@type", "")
+                if obj_type != "JobPosting" and "JobPosting" not in str(obj_type):
+                    continue
+
+                # --- Description ---
+                raw_desc = obj.get("description", "")
+                if raw_desc:
+                    # Description may contain HTML — strip tags
+                    desc_soup = BeautifulSoup(str(raw_desc), "lxml")
+                    description = desc_soup.get_text(separator="\n", strip=True)
+                else:
+                    description = None
+
+                # --- Salary from JSON-LD ---
+                salary_min, salary_max = None, None
+                base_salary = obj.get("baseSalary") or obj.get("estimatedSalary")
+                if isinstance(base_salary, dict):
+                    value = base_salary.get("value", {})
+                    if isinstance(value, dict):
+                        salary_min = self._safe_float(value.get("minValue"))
+                        salary_max = self._safe_float(value.get("maxValue"))
+                        # Check unit — annualize if hourly
+                        unit = value.get("unitText", "").upper()
+                        if unit == "HOUR":
+                            if salary_min:
+                                salary_min *= 2080
+                            if salary_max:
+                                salary_max *= 2080
+                    elif isinstance(value, (int, float)):
+                        salary_min = float(value)
+                        salary_max = float(value)
+                elif isinstance(base_salary, list) and base_salary:
+                    # Sometimes it's an array of salary objects
+                    first = base_salary[0] if isinstance(base_salary[0], dict) else {}
+                    value = first.get("value", {})
+                    if isinstance(value, dict):
+                        salary_min = self._safe_float(value.get("minValue"))
+                        salary_max = self._safe_float(value.get("maxValue"))
+
+                if description and len(description) > 50:
+                    return description, salary_min, salary_max
+
+        return None, None, None
+
+    @staticmethod
+    def _safe_float(val: object) -> float | None:
+        """Safely convert a value to float, returning None on failure."""
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
+    def _extract_longest_text_block(self, soup: BeautifulSoup) -> str | None:
+        """Last-resort fallback: find the longest text-bearing element.
+
+        This catches cases where LinkedIn has changed their class names
+        entirely. We look for divs/sections with substantial text content
+        and pick the longest one, filtering out obvious non-description
+        elements (nav, header, footer, script, style).
+        """
+        skip_tags = {"script", "style", "nav", "header", "footer", "noscript", "meta", "link"}
+        candidates: list[str] = []
+
+        for el in soup.find_all(["div", "section", "article"]):
+            # Skip elements with navigation/chrome class names
+            el_classes = " ".join(el.get("class", []))
+            if any(skip in el_classes.lower() for skip in
+                   ["nav", "header", "footer", "topcard", "similar-jobs",
+                    "sign-up", "login", "cta-modal", "contextual-sign-in"]):
+                continue
+
+            text = el.get_text(separator="\n", strip=True)
+            if text and len(text) > 200:
+                candidates.append(text)
+
+        if not candidates:
+            return None
+
+        # Pick the longest one — most likely the job description
+        best = max(candidates, key=len)
+        # Sanity check — don't return something absurdly long (probably the whole page)
+        if len(best) > 15000:
+            best = best[:15000] + "\n[... truncated]"
+
+        return best if len(best) > 200 else None
 
     # ------------------------------------------------------------------
     # Run override — enrich jobs missing descriptions

@@ -47,8 +47,9 @@ job-agent list --id 5                # full detail for job #5
 │   ├── database.py            # Async SQLite with WAL mode
 │   ├── logging_config.py      # Rotating file + console logging
 │   ├── scrapers/
-│   │   ├── base.py            # Abstract base scraper (httpx + Playwright fallback)
-│   │   └── indeed.py          # Indeed scraper (JSON-first parsing)
+│   │   ├── base.py            # Abstract base scraper + AdaptiveHealth monitor
+│   │   ├── indeed.py          # Indeed scraper (JSON-first parsing)
+│   │   └── linkedin.py        # LinkedIn scraper (guest API + Playwright)
 │   ├── evaluator/
 │   │   ├── ollama_client.py   # Async Ollama HTTP client
 │   │   └── pipeline.py        # LLM evaluation pipeline + auto-filtering
@@ -136,12 +137,17 @@ boards:
     enabled: true
     module: "app.scrapers.indeed"
     base_url: "https://www.indeed.com"
-    # search_queries: inherited from profile.target_roles
-    # location: inherited from profile.preferences.location
-    # radius_miles: inherited from profile.preferences.max_commute_miles
     max_pages: 3
     delay_min: 10.0
     delay_max: 30.0
+
+  linkedin:
+    enabled: true
+    module: "app.scrapers.linkedin"
+    base_url: "https://www.linkedin.com"
+    max_pages: 3
+    delay_min: 15.0        # LinkedIn is aggressive — stay slow
+    delay_max: 40.0
 ```
 
 ## CLI Commands
@@ -150,6 +156,7 @@ boards:
 |---------|-------------|
 | `job-agent init-db` | Create/migrate the database |
 | `job-agent scrape --board indeed` | Scrape Indeed for new listings |
+| `job-agent scrape --board linkedin` | Scrape LinkedIn for new listings |
 | `job-agent enrich` | Fetch full descriptions for jobs missing them |
 | `job-agent evaluate --model llama3.2:3b-instruct-q4_K_M` | Score all new jobs with the local LLM |
 | `job-agent evaluate --model llama3.2:3b-instruct-q4_K_M --id 5` | Evaluate a single job |
@@ -205,9 +212,46 @@ From the CLI:
 job-agent polish --id 5
 ```
 
-Or from the dashboard: open any job detail page and click "Generate Cover Letter". The letter is saved to the database and shown on the detail page with a "Copy to clipboard" button.
+Or from the dashboard: open any job detail page and click "I want a cover letter for this one" to opt in, then "Generate Cover Letter". Cover letter generation is opt-in per job — it won't clutter the detail page unless you ask for it. Once generated, the letter is saved to the database and shown on the detail page with copy and regenerate buttons.
 
 The polisher automatically picks a template (leadership vs senior IC) based on the job title, sends your resume + the job description to Claude Sonnet, and gets back a tailored 3-4 paragraph letter. Cost is roughly $0.03 per letter.
+
+## Adaptive Scraper Health
+
+All scrapers include a built-in `AdaptiveHealth` monitor that evaluates after every page fetch and auto-adjusts behavior in real time. This handles the inevitable HTML structure changes and bot detection escalations that job boards love to throw at you.
+
+### What it does
+
+The monitor tracks block rates, parse error rates, and consecutive empty pages, then makes decisions:
+
+| Condition | Action |
+|-----------|--------|
+| 30%+ fetch block rate | Increase delays by 1.5x |
+| 60%+ fetch block rate | Playwright-first + delays at 2.5x |
+| 2 consecutive blocks | Switch to Playwright-first for rest of run |
+| 50%+ parse error rate | Switch to Playwright-first (httpx may be getting bot pages) |
+| 3 consecutive empty pages (httpx) | Escalate to Playwright |
+| 3 consecutive empty pages (Playwright) | Halt the run — HTML structure likely changed |
+
+Every run's health metrics are persisted to the `scraper_health` table in SQLite, so you can track degradation over time:
+
+```sql
+SELECT source, run_at, pages_fetched, pages_blocked, parse_errors,
+       fetch_strategy, delay_min_used, delay_max_used, notes
+FROM scraper_health
+ORDER BY run_at DESC
+LIMIT 20;
+```
+
+### Tuning thresholds
+
+The defaults work well, but if you need to adjust per-board, override in the scraper subclass:
+
+```python
+self.health.parse_error_escalate_pct = 0.40   # more sensitive
+self.health.max_consecutive_empty = 2          # halt faster
+self.health.max_delay_cap = 180.0              # allow longer waits
+```
 
 ## Jetson Orin Nano Notes
 
@@ -327,13 +371,21 @@ python tests/test_core.py
 
 - [x] **Phase 1** — Scaffolding, database, config system, Indeed scraper
 - [x] **Phase 2** — Local LLM evaluation pipeline with auto-filtering
-- [x] **Phase 3** — FastAPI + HTMX web dashboard (Telegram deferred)
-- [x] **Phase 4** — Cloud API cover letter polishing (Anthropic Claude)
-- [ ] **Phase 5** — Additional scrapers (Dice, LinkedIn, remote boards) + hardening
+- [x] **Phase 3** — FastAPI + HTMX web dashboard + Telegram notifications
+- [x] **Phase 4** — Cloud API cover letter polishing (Anthropic Claude, opt-in per job)
+- [ ] **Phase 5** — Additional scrapers + hardening
+  - [x] LinkedIn scraper (guest API + Playwright fallback)
+  - [x] Adaptive scraper health monitor (auto-tuning delays, Playwright escalation, halt on structure changes)
+  - [x] `scraper_health` DB table for historical metrics
+  - [ ] Dice scraper
+  - [ ] Remote boards (We Work Remotely, Remote OK)
+  - [ ] Cross-board deduplication
+  - [ ] systemd service files
+  - [ ] Daily DB backup cron
 - [ ] **Phase 6** — Analytics, outcome tracking, continuous improvement
 
 ## Dependencies
 
-Core: `httpx[http2]`, `beautifulsoup4`, `lxml`, `aiosqlite`, `pydantic`, `pydantic-settings`, `typer`, `rich`, `pyyaml`, `apscheduler`, `fastapi`, `uvicorn`, `jinja2`, `playwright`
+Core: `httpx[http2]`, `beautifulsoup4`, `lxml`, `aiosqlite`, `pydantic`, `pydantic-settings`, `typer`, `rich`, `pyyaml`, `apscheduler`, `fastapi`, `uvicorn`, `jinja2`, `playwright`, `anthropic`
 
 See `pyproject.toml` for the full list.
