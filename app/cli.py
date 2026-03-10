@@ -523,6 +523,56 @@ def dashboard(
 
 
 # ------------------------------------------------------------------
+# notify command
+# ------------------------------------------------------------------
+
+@app.command()
+def notify(
+    test: bool = typer.Option(False, "--test", "-t", help="Send a test message to verify bot works."),
+    digest: bool = typer.Option(False, "--digest", "-d", help="Send the daily digest now."),
+) -> None:
+    """Send Telegram notifications (test or daily digest)."""
+    settings = _get_settings()
+
+    if not test and not digest:
+        console.print("[yellow]Specify --test or --digest[/yellow]")
+        raise typer.Exit(1)
+
+    async def _run() -> None:
+        from app.notifier.telegram import TelegramNotifier
+
+        notifier = TelegramNotifier.from_secrets(settings.secrets)
+        if notifier is None:
+            console.print(
+                "[red]Telegram not configured.[/red]\n"
+                "Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to config/secrets.env"
+            )
+            raise typer.Exit(1)
+
+        async with notifier:
+            if test:
+                console.print("Sending test message...")
+                ok = await notifier.test_connection()
+                if ok:
+                    console.print("[green]Test message sent! Check Telegram.[/green]")
+                else:
+                    console.print("[red]Failed to send — check token and chat ID.[/red]")
+
+            if digest:
+                console.print("Sending daily digest...")
+                async with Database(settings.db_path) as db:
+                    ok = await notifier.send_daily_digest(
+                        db, dashboard_url="http://192.168.5.58:8080"
+                    )
+                if ok:
+                    console.print("[green]Digest sent![/green]")
+                else:
+                    console.print("[red]Failed to send digest.[/red]")
+
+    asyncio.run(_run())
+
+
+# ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
 

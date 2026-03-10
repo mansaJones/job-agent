@@ -159,6 +159,8 @@ boards:
 | `job-agent list --id 5` | Full detail view for a job |
 | `job-agent dashboard` | Start the web dashboard on port 8080 |
 | `job-agent dashboard --port 3000` | Start on a custom port |
+| `job-agent notify --test` | Send a test message to Telegram |
+| `job-agent notify --digest` | Send the daily digest to Telegram |
 | `job-agent status` | Database stats by status |
 
 ## Evaluation Scoring
@@ -191,6 +193,31 @@ The 8GB shared RAM is tight. Key setup decisions:
 [Service]
 Environment="CUDA_VISIBLE_DEVICES="
 ```
+
+## Telegram Notifications
+
+Get daily digests and scrape/eval summaries pushed to your phone.
+
+### Setup
+
+1. Create a bot via `@BotFather` in Telegram (send `/newbot`)
+2. Open a chat with your bot and send it a message
+3. Get your chat ID: `curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -m json.tool`
+4. Add credentials to `config/secrets.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+```
+
+5. Test it: `job-agent notify --test`
+
+### What you'll receive
+
+- **Daily digest at 8am** — stats, top matches, link to dashboard
+- **Scrape summaries** — how many new jobs were found after each scrape
+- **Evaluation summaries** — how many jobs scored review/maybe/rejected
+- **Error alerts** — if a scraper or evaluation fails
 
 ## Web Dashboard
 

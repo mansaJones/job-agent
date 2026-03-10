@@ -20,6 +20,7 @@ from app.database import Database
 from app.evaluator.ollama_client import OllamaClient
 from app.evaluator.pipeline import EvaluationPipeline
 from app.logging_config import setup_logging
+from app.notifier.telegram import TelegramNotifier
 from app.scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class AgentRunner:
         self.settings = settings
         self.scheduler = AsyncIOScheduler()
         self._running = True
+        self._notifier = TelegramNotifier.from_secrets(settings.secrets)
 
     def _load_scraper(self, module_path: str, board_cfg, db: Database) -> BaseScraper:
         """Dynamically load and instantiate a scraper."""
@@ -45,6 +47,16 @@ class AgentRunner:
             ):
                 return attr(board_cfg, self.settings.profile, db)
         raise ImportError(f"No BaseScraper subclass found in {module_path}")
+
+    async def _notify(self, coro) -> None:
+        """Send a Telegram notification if configured. Swallows errors."""
+        if self._notifier is None:
+            return
+        try:
+            async with self._notifier as n:
+                await coro(n)
+        except Exception as e:
+            logger.warning("Telegram notification failed: %s", e)
 
     async def run_all_scrapers(self) -> None:
         """Run all enabled scrapers sequentially."""
@@ -61,8 +73,20 @@ class AgentRunner:
                     async with scraper:
                         stats = await scraper.run()
                     logger.info("Scraper %s finished — %s", name, stats.summary())
+
+                    # Notify on scrape completion
+                    await self._notify(
+                        lambda n, _name=name, _s=stats: n.send_scrape_summary(
+                            _name, _s.jobs_inserted, _s.jobs_found
+                        )
+                    )
                 except Exception as e:
                     logger.error("Scraper %s failed: %s", name, e, exc_info=True)
+                    await self._notify(
+                        lambda n, _name=name, _e=e: n.send_alert(
+                            f"Scraper {_name} failed", str(_e)
+                        )
+                    )
 
             db_stats = await db.get_stats()
             logger.info("Post-scrape DB stats: %s", db_stats)
@@ -84,13 +108,38 @@ class AgentRunner:
                 try:
                     stats = await pipeline.run(limit=100)
                     logger.info("Evaluation complete — %s", stats.summary())
+
+                    # Notify on eval completion
+                    await self._notify(
+                        lambda n, _s=stats: n.send_eval_summary(
+                            _s.evaluated, _s.ready_for_review, _s.maybe, _s.auto_rejected
+                        )
+                    )
                 except Exception as e:
                     logger.error("Evaluation failed: %s", e, exc_info=True)
+                    await self._notify(
+                        lambda n, _e=e: n.send_alert("Evaluation failed", str(_e))
+                    )
 
     async def scrape_then_evaluate(self) -> None:
         """Run scrapers first, then evaluate new jobs — the full nightly pipeline."""
         await self.run_all_scrapers()
         await self.run_evaluations()
+
+    async def send_daily_digest(self) -> None:
+        """Send the daily Telegram digest."""
+        if self._notifier is None:
+            logger.debug("Telegram not configured — skipping digest")
+            return
+
+        logger.info("Sending daily Telegram digest")
+        async with Database(self.settings.db_path) as db:
+            async with self._notifier as n:
+                try:
+                    await n.send_daily_digest(db, dashboard_url="http://192.168.5.58:8080")
+                    logger.info("Daily digest sent")
+                except Exception as e:
+                    logger.error("Failed to send digest: %s", e)
 
     def setup_schedule(self) -> None:
         """Configure the APScheduler jobs.
@@ -124,6 +173,15 @@ class AgentRunner:
             CronTrigger(hour=3, minute=30),
             id="eval_catchup",
             name="Evaluation catch-up (3:30am)",
+            replace_existing=True,
+        )
+
+        # Daily Telegram digest — 8am every day
+        self.scheduler.add_job(
+            self.send_daily_digest,
+            CronTrigger(hour=8, minute=0),
+            id="daily_digest",
+            name="Daily Telegram digest (8am)",
             replace_existing=True,
         )
 
