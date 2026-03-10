@@ -309,6 +309,57 @@ async def api_evaluate(request: Request, background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
+@app.post("/api/jobs/{job_id}/polish")
+async def api_polish(request: Request, job_id: int):
+    """Generate a cover letter for a job using Claude API."""
+    settings = get_settings()
+    db = get_db()
+
+    if not settings.secrets.anthropic_api_key:
+        if request.headers.get("HX-Request"):
+            return HTMLResponse('<span class="badge badge-red">API key not configured</span>')
+        raise HTTPException(status_code=400, detail="Anthropic API key not configured")
+
+    job = await db.get_job_with_evaluation(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Run synchronously (cover letters are fast, ~2-5s)
+    from app.polisher.claude_client import ClaudeClient
+    from app.polisher.pipeline import PolishPipeline
+
+    try:
+        async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
+            pipeline = PolishPipeline(db, claude, settings)
+            result = await pipeline.polish_job(job_id)
+    except Exception as e:
+        logger.error("Polish failed for job #%d: %s", job_id, e, exc_info=True)
+        if request.headers.get("HX-Request"):
+            return HTMLResponse(f'<span class="badge badge-red">Error: {e}</span>')
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if result is None:
+        if request.headers.get("HX-Request"):
+            return HTMLResponse('<span class="badge badge-red">Generation failed</span>')
+        raise HTTPException(status_code=500, detail="Cover letter generation failed")
+
+    if request.headers.get("HX-Request"):
+        # Return the cover letter section for HTMX swap
+        return templates.TemplateResponse("partials/cover_letter.html", {
+            "request": request,
+            "cover_letter": result.cover_letter,
+            "cost": result.cost_display,
+            "model": result.model_used,
+        })
+
+    return {
+        "status": "ok",
+        "cover_letter": result.cover_letter,
+        "cost": result.cost_display,
+        "model": result.model_used,
+    }
+
+
 @app.get("/api/tasks/status")
 async def api_task_status():
     """Check background task status."""

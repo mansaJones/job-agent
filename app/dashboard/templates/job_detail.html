@@ -24,7 +24,7 @@
 </div>
 
 <div class="detail-grid">
-    <!-- Left column: Description -->
+    <!-- Left column: Description + Cover Letter -->
     <div>
         <div class="card">
             <h2>Description</h2>
@@ -33,6 +33,41 @@
             {% else %}
             <div class="empty-state" style="padding: 1.5rem;">
                 <p>No description available.</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Cover Letter section -->
+        <div id="cover-letter-area">
+            {% if job.cover_letter %}
+            <div class="card" style="border-color: var(--accent);">
+                <h2 style="color: var(--accent);">Cover Letter</h2>
+                <div class="detail-description" id="cover-letter-text" style="white-space: pre-wrap;">{{ job.cover_letter }}</div>
+                <div style="margin-top: 1rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/jobs/{{ job.id }}/polish"
+                            hx-target="#cover-letter-area"
+                            hx-swap="innerHTML">
+                        Regenerate
+                    </button>
+                    <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('cover-letter-text').innerText).then(() => this.innerText = 'Copied!')">
+                        Copy to clipboard
+                    </button>
+                </div>
+            </div>
+            {% else %}
+            <div class="card">
+                <h2>Cover Letter</h2>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/jobs/{{ job.id }}/polish"
+                            hx-target="#cover-letter-area"
+                            hx-swap="innerHTML"
+                            hx-indicator="#polish-spinner">
+                        Generate Cover Letter
+                    </button>
+                    <span id="polish-spinner" class="htmx-indicator" style="color: var(--text-muted); font-size: 0.85rem;">Generating...</span>
+                </div>
             </div>
             {% endif %}
         </div>

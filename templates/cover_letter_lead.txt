@@ -1,0 +1,10 @@
+TEMPLATE: Leadership / Management Role
+
+STRUCTURE:
+- Opening: Express specific interest in the company and role. Mention what attracted you to this opportunity.
+- Paragraph 2: Highlight leadership experience — team size, cross-functional collaboration, mentoring. Connect to the role's management requirements.
+- Paragraph 3: Technical depth — demonstrate that you're not just a manager, you understand the technology. Reference specific technical achievements relevant to the job.
+- Paragraph 4: Cultural fit and impact — show alignment with the company's mission or values. Mention a measurable outcome from a similar role.
+- Closing: Confident but not arrogant. Express enthusiasm for contributing to the team.
+
+TONE: Confident, experienced, collaborative. Emphasize servant leadership and technical credibility.

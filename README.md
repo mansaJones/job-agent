@@ -161,6 +161,8 @@ boards:
 | `job-agent dashboard --port 3000` | Start on a custom port |
 | `job-agent notify --test` | Send a test message to Telegram |
 | `job-agent notify --digest` | Send the daily digest to Telegram |
+| `job-agent polish --id 5` | Generate a cover letter for job #5 |
+| `job-agent polish --id 5 --resume ~/agent/resumes/resume.pdf` | Use a specific resume |
 | `job-agent status` | Database stats by status |
 
 ## Evaluation Scoring
@@ -174,6 +176,38 @@ The local LLM scores each job from 0.0 to 1.0 against your profile:
 | < 0.4 | `rejected` | Auto-rejected (reason stored in DB) |
 
 Scoring rules: matching ANY must-have skill is a positive signal (not all required). Missing salary info is treated as neutral. Only clearly irrelevant jobs score below 0.3.
+
+## Cover Letter Generation (Phase 4)
+
+When you find a job worth applying to, generate a tailored cover letter using the Anthropic Claude API.
+
+### Setup
+
+1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
+2. Add to `config/secrets.env`:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
+
+3. Put your resume in the `resumes/` directory:
+
+```bash
+mkdir -p ~/agent/resumes
+# scp your resume from your PC
+```
+
+### Usage
+
+From the CLI:
+
+```bash
+job-agent polish --id 5
+```
+
+Or from the dashboard: open any job detail page and click "Generate Cover Letter". The letter is saved to the database and shown on the detail page with a "Copy to clipboard" button.
+
+The polisher automatically picks a template (leadership vs senior IC) based on the job title, sends your resume + the job description to Claude Sonnet, and gets back a tailored 3-4 paragraph letter. Cost is roughly $0.03 per letter.
 
 ## Jetson Orin Nano Notes
 
@@ -294,7 +328,7 @@ python tests/test_core.py
 - [x] **Phase 1** — Scaffolding, database, config system, Indeed scraper
 - [x] **Phase 2** — Local LLM evaluation pipeline with auto-filtering
 - [x] **Phase 3** — FastAPI + HTMX web dashboard (Telegram deferred)
-- [ ] **Phase 4** — Cloud API cover letter polishing (Anthropic Claude)
+- [x] **Phase 4** — Cloud API cover letter polishing (Anthropic Claude)
 - [ ] **Phase 5** — Additional scrapers (Dice, LinkedIn, remote boards) + hardening
 - [ ] **Phase 6** — Analytics, outcome tracking, continuous improvement
 

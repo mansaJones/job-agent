@@ -573,6 +573,66 @@ def notify(
 
 
 # ------------------------------------------------------------------
+# polish command
+# ------------------------------------------------------------------
+
+@app.command()
+def polish(
+    job_id: int = typer.Option(
+        ..., "--id", help="Job ID to generate a cover letter for.",
+    ),
+    resume: Optional[str] = typer.Option(
+        None, "--resume", "-r",
+        help="Path to resume file (PDF/TXT). Default: auto-detect from resumes/.",
+    ),
+) -> None:
+    """Generate a tailored cover letter for a job using Claude API."""
+    settings = _get_settings()
+
+    if not settings.secrets.anthropic_api_key:
+        console.print(
+            "[red]Anthropic API key not configured.[/red]\n"
+            "Add ANTHROPIC_API_KEY to config/secrets.env"
+        )
+        raise typer.Exit(1)
+
+    async def _run() -> None:
+        from pathlib import Path as P
+        from app.polisher.claude_client import ClaudeClient
+        from app.polisher.pipeline import PolishPipeline
+
+        resume_path = P(resume) if resume else None
+
+        async with Database(settings.db_path) as db:
+            # Verify job exists
+            job = await db.get_job(job_id)
+            if not job:
+                console.print(f"[red]No job with ID {job_id}[/red]")
+                return
+
+            console.print(f"[bold cyan]Generating cover letter for:[/bold cyan]")
+            console.print(f"  {job.title} @ {job.company or 'Unknown'}")
+
+            async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
+                pipeline = PolishPipeline(db, claude, settings, resume_path=resume_path)
+                result = await pipeline.polish_job(job_id)
+
+            if result is None:
+                console.print("[red]Cover letter generation failed — check logs.[/red]")
+                return
+
+            console.print(f"\n[green]Cover letter generated![/green]")
+            console.print(f"[dim]Model: {result.model_used} | "
+                         f"Tokens: {result.input_tokens} in / {result.output_tokens} out | "
+                         f"Cost: {result.cost_display}[/dim]\n")
+            console.print("[bold]--- Cover Letter ---[/bold]\n")
+            console.print(result.cover_letter)
+            console.print(f"\n[dim]Saved to database — view at http://192.168.5.58:8080/jobs/{job_id}[/dim]")
+
+    asyncio.run(_run())
+
+
+# ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
 

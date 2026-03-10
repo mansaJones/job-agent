@@ -433,7 +433,8 @@ class Database:
                    e.match_score AS eval_score,
                    e.reasoning AS eval_reasoning,
                    e.model_used AS eval_model,
-                   e.evaluated_at AS eval_date
+                   e.evaluated_at AS eval_date,
+                   e.cover_letter_draft AS cover_letter
             FROM jobs j
             LEFT JOIN evaluations e ON e.job_id = j.id
                 AND e.evaluated_at = (

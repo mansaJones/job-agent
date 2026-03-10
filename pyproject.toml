@@ -18,6 +18,8 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "jinja2>=3.1",
+    "anthropic>=0.39",
+    "pymupdf>=1.24",
 ]
 
 [project.optional-dependencies]

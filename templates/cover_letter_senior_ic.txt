@@ -1,0 +1,10 @@
+TEMPLATE: Senior Individual Contributor Role
+
+STRUCTURE:
+- Opening: Connect your background to the specific role. Show you understand what the team is building.
+- Paragraph 2: Deep technical expertise — reference specific technologies, architectures, or systems you've built that are relevant. Quantify impact where possible.
+- Paragraph 3: Collaboration and influence — even as an IC, show you elevate the team. Mention code reviews, mentoring, architecture decisions, cross-team work.
+- Paragraph 4: Why this company and team specifically — show you've done your research. Connect your career trajectory to this opportunity.
+- Closing: Forward-looking. Express excitement about the technical challenges.
+
+TONE: Technical authority with humility. Show depth without lecturing. Enthusiastic about building.
