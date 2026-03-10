@@ -19,6 +19,19 @@ boards:
     headers:
       Accept-Language: "en-US,en;q=0.9"
 
+  linkedin:
+    enabled: true
+    module: "app.scrapers.linkedin"
+    base_url: "https://www.linkedin.com"
+    # search_queries: inherited from profile.target_roles (lowercased)
+    # location: inherited from profile.preferences.location
+    # radius_miles: inherited from profile.preferences.max_commute_miles
+    max_pages: 3
+    delay_min: 15.0        # LinkedIn is aggressive — stay slow
+    delay_max: 40.0
+    headers:
+      Accept-Language: "en-US,en;q=0.9"
+
   # Future scrapers — disabled until implemented
   dice:
     enabled: false

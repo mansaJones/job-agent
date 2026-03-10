@@ -123,12 +123,31 @@ CREATE TABLE IF NOT EXISTS applied (
     follow_up_date TEXT
 );
 
+CREATE TABLE IF NOT EXISTS scraper_health (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    run_at TEXT DEFAULT (datetime('now')),
+    pages_fetched INTEGER DEFAULT 0,
+    pages_blocked INTEGER DEFAULT 0,
+    pages_failed INTEGER DEFAULT 0,
+    jobs_found INTEGER DEFAULT 0,
+    jobs_parsed INTEGER DEFAULT 0,
+    parse_errors INTEGER DEFAULT 0,
+    playwright_used INTEGER DEFAULT 0,
+    delay_min_used REAL,
+    delay_max_used REAL,
+    fetch_strategy TEXT DEFAULT 'httpx',
+    notes TEXT
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_source_ext
     ON jobs(source, external_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status
     ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_evaluations_score
     ON evaluations(match_score);
+CREATE INDEX IF NOT EXISTS idx_scraper_health_source
+    ON scraper_health(source, run_at);
 """
 
 
