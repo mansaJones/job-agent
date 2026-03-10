@@ -362,7 +362,7 @@ async def _run_evaluate():
         from app.evaluator.pipeline import EvaluationPipeline
 
         ollama_url = settings.secrets.ollama_base_url or "http://localhost:11434"
-        model = settings.secrets.ollama_model or "qwen2.5:1.5b"
+        model = settings.secrets.ollama_model or "llama3.2:3b-instruct-q4_K_M"
 
         async with OllamaClient(base_url=ollama_url, model=model) as ollama:
             if not await ollama.is_healthy():
