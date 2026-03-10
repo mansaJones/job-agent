@@ -203,7 +203,7 @@ def evaluate(
     ),
     model: Optional[str] = typer.Option(
         None, "--model", "-m",
-        help="Ollama model to use (default: from config or qwen2.5:1.5b).",
+        help="Ollama model to use (default: from config or llama3.2:3b-instruct-q4_K_M).",
     ),
     job_id: Optional[int] = typer.Option(
         None, "--id",

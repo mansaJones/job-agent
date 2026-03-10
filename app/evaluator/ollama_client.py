@@ -15,7 +15,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "llama3.1:8b-instruct-q4_K_M"
+DEFAULT_MODEL = "llama3.2:3b-instruct-q4_K_M"
 
 
 class OllamaError(Exception):

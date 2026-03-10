@@ -6,7 +6,7 @@ Autonomous job search agent built for the Jetson Orin Nano 8GB. Scrapes job boar
 
 - **Board:** NVIDIA Jetson Orin Nano 8GB (shared CPU/GPU RAM)
 - **Storage:** 1TB NVMe SSD
-- **LLM:** Ollama running `qwen2.5:1.5b` (CPU-only, ~934MB)
+- **LLM:** Ollama running `llama3.2:3b-instruct-q4_K_M` (CPU-only, ~934MB)
 - **Network:** WiFi, static IP `192.168.5.58`
 - **Access:** SSH over LAN
 
@@ -28,7 +28,7 @@ job-agent scrape --board indeed
 
 # Evaluate scraped jobs with the local LLM
 sudo systemctl start ollama
-job-agent evaluate --model qwen2.5:1.5b
+job-agent evaluate --model llama3.2:3b-instruct-q4_K_M
 
 # View results
 job-agent list
@@ -151,8 +151,8 @@ boards:
 | `job-agent init-db` | Create/migrate the database |
 | `job-agent scrape --board indeed` | Scrape Indeed for new listings |
 | `job-agent enrich` | Fetch full descriptions for jobs missing them |
-| `job-agent evaluate --model qwen2.5:1.5b` | Score all new jobs with the local LLM |
-| `job-agent evaluate --model qwen2.5:1.5b --id 5` | Evaluate a single job |
+| `job-agent evaluate --model llama3.2:3b-instruct-q4_K_M` | Score all new jobs with the local LLM |
+| `job-agent evaluate --model llama3.2:3b-instruct-q4_K_M --id 5` | Evaluate a single job |
 | `job-agent list` | Show all jobs in a table |
 | `job-agent list --status evaluated` | Show only top matches |
 | `job-agent list --status rejected` | Show rejected jobs with reasons |
@@ -182,7 +182,7 @@ The 8GB shared RAM is tight. Key setup decisions:
 - **Desktop GUI disabled** to free ~1.5GB: `sudo systemctl set-default multi-user.target`
 - **Max power mode**: `sudo nvpmodel -m 0 && sudo jetson_clocks`
 - **CPU-only LLM inference**: Ollama service configured with `CUDA_VISIBLE_DEVICES=""` to avoid GPU memory contention
-- **Model**: `qwen2.5:1.5b` (~934MB) — the largest model that fits comfortably
+- **Model**: `llama3.2:3b-instruct-q4_K_M` (~934MB) — the largest model that fits comfortably
 - **Static IP**: `192.168.5.58` configured via NetworkManager to prevent SSH disconnects
 - **WiFi power save disabled**: `sudo iw wlan0 set power_save off`
 
@@ -277,7 +277,7 @@ If you change the scoring prompt or profile, reset and re-evaluate:
 ```bash
 source ~/agent/venv/bin/activate
 sqlite3 ~/agent/data/jobs.db "DELETE FROM evaluations; UPDATE jobs SET status = 'new', rejection_reason = NULL;"
-job-agent evaluate --model qwen2.5:1.5b
+job-agent evaluate --model llama3.2:3b-instruct-q4_K_M
 ```
 
 ## Running Tests
