@@ -96,9 +96,10 @@ class AgentRunner:
         logger.info("Scheduled evaluation run starting at %s", datetime.now(timezone.utc).isoformat())
 
         ollama_url = self.settings.secrets.ollama_base_url or "http://localhost:11434"
+        model = self.settings.secrets.ollama_model or "qwen2.5:1.5b"
 
         async with Database(self.settings.db_path) as db:
-            async with OllamaClient(base_url=ollama_url) as ollama:
+            async with OllamaClient(base_url=ollama_url, model=model) as ollama:
                 if not await ollama.is_healthy():
                     logger.error("Ollama not reachable at %s — skipping evaluation", ollama_url)
                     return

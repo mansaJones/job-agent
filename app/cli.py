@@ -203,7 +203,7 @@ def evaluate(
     ),
     model: Optional[str] = typer.Option(
         None, "--model", "-m",
-        help="Ollama model to use (default: llama3.1:8b-instruct-q4_K_M).",
+        help="Ollama model to use (default: from config or qwen2.5:1.5b).",
     ),
     job_id: Optional[int] = typer.Option(
         None, "--id",
@@ -218,7 +218,7 @@ def evaluate(
         from app.evaluator.pipeline import EvaluationPipeline
 
         ollama_url = settings.secrets.ollama_base_url or "http://localhost:11434"
-        model_name = model or "llama3.1:8b-instruct-q4_K_M"
+        model_name = model or settings.secrets.ollama_model or "qwen2.5:1.5b"
 
         async with Database(settings.db_path) as db:
             async with OllamaClient(base_url=ollama_url, model=model_name) as ollama:
