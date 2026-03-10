@@ -37,9 +37,10 @@
             {% endif %}
         </div>
 
-        <!-- Cover Letter section -->
+        <!-- Cover Letter section (opt-in per job) -->
         <div id="cover-letter-area">
             {% if job.cover_letter %}
+            <!-- Already generated — always show -->
             <div class="card" style="border-color: var(--accent);">
                 <h2 style="color: var(--accent);">Cover Letter</h2>
                 <div class="detail-description" id="cover-letter-text" style="white-space: pre-wrap;">{{ job.cover_letter }}</div>
@@ -56,8 +57,21 @@
                 </div>
             </div>
             {% else %}
-            <div class="card">
+            <!-- No cover letter yet — show opt-in toggle instead of always-visible generator -->
+            <div class="card" id="cover-letter-opt-in">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="color: var(--text-muted); font-size: 0.9rem;">Cover letter not generated</span>
+                    <button class="btn btn-ghost btn-sm"
+                            onclick="document.getElementById('cover-letter-opt-in').style.display='none'; document.getElementById('cover-letter-generator').style.display='block';">
+                        I want a cover letter for this one
+                    </button>
+                </div>
+            </div>
+            <div class="card" id="cover-letter-generator" style="display: none;">
                 <h2>Cover Letter</h2>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                    Generate a tailored cover letter using Claude API.
+                </p>
                 <div style="display: flex; align-items: center; gap: 1rem;">
                     <button class="btn btn-primary btn-sm"
                             hx-post="/api/jobs/{{ job.id }}/polish"
@@ -65,6 +79,10 @@
                             hx-swap="innerHTML"
                             hx-indicator="#polish-spinner">
                         Generate Cover Letter
+                    </button>
+                    <button class="btn btn-ghost btn-sm"
+                            onclick="document.getElementById('cover-letter-generator').style.display='none'; document.getElementById('cover-letter-opt-in').style.display='block';">
+                        Never mind
                     </button>
                     <span id="polish-spinner" class="htmx-indicator" style="color: var(--text-muted); font-size: 0.85rem;">Generating...</span>
                 </div>
