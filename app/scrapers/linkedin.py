@@ -317,31 +317,67 @@ class LinkedInScraper(BaseScraper):
         """
         job_id = self._extract_job_id(job.url)
         if not job_id:
+            logger.warning("[linkedin] Could not extract job ID from URL: %s", job.url)
             return job
 
         # --- Strategy 1: Guest detail API (lightweight, often works) ---
         detail_url = f"{self.DETAIL_API_BASE}/{job_id}"
         result = await self._fetch_httpx(detail_url)
+
         if result.status == FetchStatus.SUCCESS and result.html:
+            html_len = len(result.html)
+            logger.info("[linkedin] Guest API returned %d bytes for job #%s", html_len, job_id)
+
+            # Save snapshot for debugging
+            self.save_html_snapshot(result.html, "linkedin_detail_api", job_id)
+
+            # Log a snippet so we can see what we're parsing
+            snippet = result.html[:500].replace("\n", " ").strip()
+            logger.info("[linkedin] Detail HTML preview: %s", snippet[:200])
+
             desc, salary_min, salary_max = self._extract_detail_data(result.html)
             if desc and len(desc) > 100:
+                logger.info("[linkedin] Enriched job #%s via guest API (%d chars)", job_id, len(desc))
                 job.description = desc
                 if salary_min and not job.salary_min:
                     job.salary_min = salary_min
                 if salary_max and not job.salary_max:
                     job.salary_max = salary_max
                 return job
+            else:
+                logger.warning("[linkedin] Guest API HTML had no extractable description for job #%s "
+                               "(html=%d bytes, desc=%s)", job_id, html_len,
+                               f"{len(desc)} chars" if desc else "None")
+        else:
+            logger.warning("[linkedin] Guest API fetch failed for job #%s: status=%s",
+                           job_id, result.status.value)
 
         # --- Strategy 2: Playwright for the full page ---
+        logger.info("[linkedin] Trying Playwright for job #%s", job_id)
         pw_result = await self._fetch_playwright(job.url)
+
         if pw_result.status == FetchStatus.SUCCESS and pw_result.html:
+            html_len = len(pw_result.html)
+            logger.info("[linkedin] Playwright returned %d bytes for job #%s", html_len, job_id)
+
+            # Save snapshot for debugging
+            self.save_html_snapshot(pw_result.html, "linkedin_detail_pw", job_id)
+
             desc, salary_min, salary_max = self._extract_detail_data(pw_result.html)
             if desc and len(desc) > 100:
+                logger.info("[linkedin] Enriched job #%s via Playwright (%d chars)", job_id, len(desc))
                 job.description = desc
                 if salary_min and not job.salary_min:
                     job.salary_min = salary_min
                 if salary_max and not job.salary_max:
                     job.salary_max = salary_max
+            else:
+                logger.warning("[linkedin] Playwright HTML had no extractable description for job #%s "
+                               "(html=%d bytes, desc=%s)", job_id, html_len,
+                               f"{len(desc)} chars" if desc else "None")
+        else:
+            logger.warning("[linkedin] Playwright fetch also failed for job #%s: status=%s",
+                           job_id, pw_result.status.value)
 
         return job
 
