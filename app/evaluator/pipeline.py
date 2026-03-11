@@ -13,8 +13,6 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-import yaml
-
 from app.config import ProfileConfig
 from app.database import Database, EvaluationRecord, JobRecord
 from app.evaluator.ollama_client import OllamaClient, OllamaError
@@ -52,41 +50,65 @@ class EvalResult:
 # Prompt builder
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a job matching assistant. You evaluate job postings against a candidate's profile and provide structured scoring.
+SYSTEM_PROMPT = """You are a job matching assistant. You evaluate job postings against a candidate's profile and return a JSON score.
 
-You MUST respond with valid JSON only. No markdown, no explanation outside the JSON object."""
+You MUST respond with valid JSON only. No markdown, no explanation outside the JSON."""
 
-EVAL_PROMPT_TEMPLATE = """Score how well this job matches the candidate profile from 0.0 to 1.0.
+EVAL_PROMPT_TEMPLATE = """Score this job 0.0 to 1.0 for the candidate below. Follow the scoring tiers EXACTLY.
 
-SCORING RULES (follow these exactly):
-- The candidate does NOT need ALL must-have skills. Matching even ONE must-have skill is a positive signal.
-- A job matching 2-3 must-have skills is a strong match (0.6+). Matching 4+ is excellent (0.8+).
-- Nice-to-have skills are bonus points, not requirements.
-- Role/title alignment: if the job title is similar to ANY target role, that's a strong positive.
-- Remote/hybrid jobs should score well if remote_ok or hybrid_ok is True.
-- If salary is not listed, do NOT penalize the score — treat it as neutral.
-- Only give scores below 0.3 for jobs that are clearly irrelevant (wrong field entirely, junior when candidate is senior, etc.)
+=== SCORING TIERS (use these as hard anchors) ===
 
-CANDIDATE PROFILE:
+0.85-1.0  EXCELLENT — Title matches a target role AND 3+ core skills AND seniority fits
+0.70-0.84 STRONG   — Title is close to a target role AND 2+ core skills AND seniority fits
+0.55-0.69 GOOD     — Related role, 2+ core skills, but title or seniority is slightly off
+0.40-0.54 MAYBE    — Some skill overlap but role is tangential or seniority mismatch
+0.20-0.39 WEAK     — Minimal overlap, wrong field, or wrong seniority level
+0.00-0.19 NO MATCH — Completely different field (medical, legal, mechanical, etc.)
+
+=== MANDATORY RULES ===
+
+SENIORITY (critical — candidate has {experience_years} years experience):
+- Target seniority: Lead, Senior, Manager, Principal, Staff, Director
+- Jobs titled "Junior", "Associate", "Entry Level", or "I/II" without "Senior" → cap at 0.30
+- Jobs with no seniority indicator → score normally based on skills and duties
+- Federal GS grades: GS-13+ is senior-level, GS-12 is mid, GS-11 and below is junior
+
+SKILLS (match on ANY, not ALL):
+- Core skills: {must_have_skills}
+- Bonus skills: {nice_to_have_skills}
+- Matching 1 core skill = positive signal. 2-3 = strong. 4+ = excellent.
+- Bonus skills add +0.05 each (max +0.15 total)
+
+SALARY:
+- Candidate minimum: ${salary_min:,}/year
+- If salary listed and max is BELOW ${salary_min:,} → subtract 0.20 from score
+- If salary not listed → neutral (no penalty)
+
+LOCATION:
+- Remote OK: {remote_ok} | Hybrid OK: {hybrid_ok} | Onsite OK: {onsite_ok}
+- If job requires onsite and onsite_ok is False → subtract 0.15
+
+FIELD RELEVANCE:
+- Target field: software/web development, engineering management
+- Medical, legal, clerical, mechanical, accounting, HR roles → cap at 0.15 regardless of skills listed
+- Government IT/software roles ARE relevant — score them normally
+
+=== CANDIDATE PROFILE ===
 Target Roles: {target_roles}
-Core Skills (match on ANY, not all): {must_have_skills}
-Bonus Skills: {nice_to_have_skills}
-Location: {location}
-Remote OK: {remote_ok} | Hybrid OK: {hybrid_ok} | Onsite OK: {onsite_ok}
-Max Commute: {max_commute_miles} miles
-Minimum Salary: ${salary_min:,}/year
-Experience: {experience_years} years
+Location: {location} (Max commute: {max_commute_miles} mi)
 
-JOB POSTING:
+=== JOB POSTING ===
 Title: {job_title}
 Company: {job_company}
 Location: {job_location}
-Salary Range: {job_salary}
+Salary: {job_salary}
+Source: {job_source}
+
 Description:
 {job_description}
 
-Respond with this exact JSON structure:
-{{"score": 0.0, "reasoning": "2-3 sentence explanation", "red_flags": ["list", "of", "concerns"], "highlights": ["list", "of", "positives"]}}"""
+=== RESPOND WITH THIS JSON ===
+{{"score": 0.0, "reasoning": "2-3 sentences", "red_flags": ["concern1"], "highlights": ["positive1"]}}"""
 
 
 def build_profile_context(profile: ProfileConfig) -> dict[str, str]:
@@ -105,6 +127,25 @@ def build_profile_context(profile: ProfileConfig) -> dict[str, str]:
     }
 
 
+def _smart_truncate(description: str, max_chars: int = 4000) -> str:
+    """Truncate long descriptions while preserving the most useful sections.
+
+    Strategy: keep the first chunk (usually role summary) and the last chunk
+    (usually requirements/qualifications), trimming the middle filler.
+    """
+    if len(description) <= max_chars:
+        return description
+
+    # Keep first 60% and last 30% of budget, with a gap indicator
+    head_budget = int(max_chars * 0.60)
+    tail_budget = int(max_chars * 0.30)
+
+    head = description[:head_budget]
+    tail = description[-tail_budget:]
+
+    return f"{head}\n[... middle section trimmed ...]\n{tail}"
+
+
 def build_eval_prompt(profile: ProfileConfig, job: JobRecord) -> str:
     """Build the full evaluation prompt for a single job."""
     ctx = build_profile_context(profile)
@@ -119,10 +160,9 @@ def build_eval_prompt(profile: ProfileConfig, job: JobRecord) -> str:
     else:
         job_salary = "Not listed"
 
-    # Truncate description to avoid blowing context window
+    # Smart truncation — keeps head (summary) and tail (requirements)
     description = job.description or "No description available"
-    if len(description) > 3000:
-        description = description[:3000] + "\n[... truncated]"
+    description = _smart_truncate(description, max_chars=4000)
 
     return EVAL_PROMPT_TEMPLATE.format(
         **ctx,
@@ -131,6 +171,7 @@ def build_eval_prompt(profile: ProfileConfig, job: JobRecord) -> str:
         job_location=job.location or "Not specified",
         job_salary=job_salary,
         job_description=description,
+        job_source=job.source or "unknown",
     )
 
 
