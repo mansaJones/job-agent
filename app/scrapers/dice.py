@@ -123,110 +123,163 @@ class DiceScraper(BaseScraper):
         return jobs_from_links
 
     def _find_job_cards(self, soup: BeautifulSoup) -> list[Tag]:
-        """Find job card elements using multiple selector strategies."""
-        # Dice commonly uses data-cy attributes for test IDs
-        # and wraps cards in custom elements or specific divs
-        selectors = [
-            # data-cy based selectors (Dice's testing convention)
-            "[data-cy='search-card']",
-            # Common Dice card patterns
-            "div.card.search-card",
-            "dhi-search-card",  # custom web component
-            "div[class*='search-card']",
-            "div[class*='SearchCard']",
-            # Generic card containers that link to job details
-            "div[class*='job-card']",
-            "div[class*='JobCard']",
-            "a[href*='/job-detail/']",
-            # Broader: any card-like container
-            "div[class*='card'][class*='job']",
-        ]
+        """Find job card containers by locating overlay links and walking up.
 
-        for selector in selectors:
-            cards = soup.select(selector)
+        Dice 2026 card structure (Tailwind + data-testid):
+          Each card has an invisible overlay <a data-testid="job-search-job-card-link">
+          that covers the whole card. We find those, then walk up to the
+          card container <div> so we can extract title/company/location
+          from sibling elements.
+        """
+        cards: list[Tag] = []
+        seen: set[str] = set()
+
+        # Primary: find the overlay links that mark each card
+        overlay_links = soup.select("a[data-testid='job-search-job-card-link']")
+        if overlay_links:
+            for link in overlay_links:
+                href = str(link.get("href", ""))
+                if href in seen or "/job-detail/" not in href:
+                    continue
+                seen.add(href)
+                # Walk up to the card container (parent with 'card' in class)
+                card = link
+                for _ in range(5):
+                    if card.parent is None:
+                        break
+                    card = card.parent
+                    classes = " ".join(card.get("class", []))
+                    if "card" in classes.lower() or "shadow" in classes:
+                        break
+                if card is not link:
+                    cards.append(card)
             if cards:
-                logger.debug("[dice] Found %d cards with selector: %s", len(cards), selector)
+                logger.debug("[dice] Found %d cards via overlay links", len(cards))
+                return cards
+
+        # Fallback: find title links directly
+        title_links = soup.select("a[data-testid='job-search-job-detail-link']")
+        if title_links:
+            for link in title_links:
+                href = str(link.get("href", ""))
+                if href in seen or "/job-detail/" not in href:
+                    continue
+                seen.add(href)
+                card = link
+                for _ in range(5):
+                    if card.parent is None:
+                        break
+                    card = card.parent
+                    classes = " ".join(card.get("class", []))
+                    if "card" in classes.lower() or "shadow" in classes:
+                        break
+                if card is not link:
+                    cards.append(card)
+            if cards:
+                logger.debug("[dice] Found %d cards via title links", len(cards))
                 return cards
 
         return []
 
     def _parse_card(self, card: Tag) -> JobRecord | None:
-        """Extract job data from a single Dice job card element."""
+        """Extract job data from a single Dice job card element.
+
+        Dice 2026 card anatomy (3 <a> links per card, same href):
+          1. <a data-testid="job-search-job-card-link"> — invisible overlay,
+             aria-label="View Details for TITLE (hash)"
+          2. <a> with text "Apply Now" or "Easy Apply" — button, skip
+          3. <a data-testid="job-search-job-detail-link"> — real title link,
+             class includes text-xl font-semibold
+
+        Company is in <p class="mb-0 line-clamp-2 text-sm"> inside span.logo
+        Location is in <p class="text-sm font-normal text-zinc-600">
+        Salary is in <div class="box ..."><p> with "USD" text
+        """
         # --- Title and URL ---
-        title_el = (
-            card.select_one("[data-cy='card-title-link']")
-            or card.select_one("a[class*='cardTitle']")
-            or card.select_one("a[class*='card-title']")
-            or card.select_one("h5 a")
-            or card.select_one("a[href*='/job-detail/']")
-        )
+        # Strategy A: data-testid title link (most reliable)
+        title_el = card.select_one("a[data-testid='job-search-job-detail-link']")
+        url = None
+        title = None
 
-        # If the card itself is an <a> tag pointing to job-detail
-        if title_el is None and card.name == "a":
-            href = card.get("href", "")
-            if "/job-detail/" in str(href):
-                title_el = card
+        if title_el:
+            title = title_el.get_text(strip=True)
+            href = title_el.get("href", "")
+            if href:
+                base = self.config.base_url or "https://www.dice.com"
+                url = urljoin(base, str(href))
 
-        if title_el is None:
+        # Strategy B: overlay link's aria-label
+        if not title or not url:
+            overlay = card.select_one("a[data-testid='job-search-job-card-link']")
+            if overlay:
+                href = overlay.get("href", "")
+                if href and not url:
+                    base = self.config.base_url or "https://www.dice.com"
+                    url = urljoin(base, str(href))
+                if not title:
+                    aria = overlay.get("aria-label", "")
+                    # "View Details for Front-End Developer - Clearance Required (hash)"
+                    match = re.match(r"View Details? for (.+?)(?:\s*\([a-f0-9]+\))?$",
+                                     aria, re.IGNORECASE)
+                    if match:
+                        title = match.group(1).strip()
+
+        if not title or not url or "/job-detail/" not in url:
             return None
 
-        title = title_el.get_text(strip=True)
-        if not title:
-            return None
-
-        # Build the full URL
-        href = title_el.get("href", "")
-        if not href:
-            return None
-
-        base = self.config.base_url or "https://www.dice.com"
-        url = urljoin(base, str(href))
-
-        # Only keep /job-detail/ URLs
-        if "/job-detail/" not in url:
-            return None
-
-        # Extract external_id (UUID from the URL)
         external_id = self._extract_job_id(url)
 
         # --- Company ---
-        company_el = (
-            card.select_one("[data-cy='search-result-company-name']")
-            or card.select_one("[data-cy='card-company']")
-            or card.select_one("a[class*='companyName']")
-            or card.select_one("span[class*='company']")
-            or card.select_one("[class*='Company']")
-        )
-        company = company_el.get_text(strip=True) if company_el else None
+        # Company name lives in the header/logo area as a <p> with line-clamp
+        company = None
+        logo_area = card.select_one("span.logo") or card.select_one("[class*='logo']")
+        if logo_area:
+            company_el = logo_area.select_one("p")
+            if company_el:
+                company = company_el.get_text(strip=True)
 
-        # --- Location ---
-        location_el = (
-            card.select_one("[data-cy='search-result-location']")
-            or card.select_one("[data-cy='card-location']")
-            or card.select_one("span[class*='location']")
-            or card.select_one("[class*='Location']")
-        )
-        location = location_el.get_text(strip=True) if location_el else None
+        # Fallback: look for company-like patterns
+        if not company:
+            for sel in ["[data-testid*='company']", "p.line-clamp-2",
+                        "p[class*='line-clamp']"]:
+                el = card.select_one(sel)
+                if el:
+                    text = el.get_text(strip=True)
+                    # Skip if it's the title or a button
+                    if text and text != title and text.lower() not in self._JUNK_TITLES:
+                        company = text
+                        break
+
+        # --- Location and Date ---
+        # Location + date are in <p class="text-sm font-normal text-zinc-600"> tags
+        location = None
+        date_posted = None
+        info_texts = card.select("p.text-sm.font-normal.text-zinc-600")
+        if not info_texts:
+            # Broader fallback
+            info_texts = card.select("p.text-sm.text-zinc-600")
+        for p in info_texts:
+            text = p.get_text(strip=True)
+            if not text:
+                continue
+            # Date patterns: "Today", "X days ago", "30+ days ago"
+            if re.match(r"(today|\d+\+?\s*days?\s*ago|yesterday)", text, re.IGNORECASE):
+                date_posted = text
+            elif not location:
+                # First non-date text-sm is location (e.g. "Remote", "Chicago, IL")
+                location = text
 
         # --- Salary ---
-        salary_min, salary_max = self._parse_salary_from_card(card)
+        salary_min, salary_max = None, None
+        # Salary is in a <p> inside a "box" div, text like "USD 130,000.00 - 160,000.00 per year"
+        for p in card.select("div.box p, p[class*='items-center']"):
+            text = p.get_text(strip=True)
+            if "USD" in text or "$" in text:
+                salary_min, salary_max = self._parse_salary_text(text)
+                break
 
-        # --- Date posted ---
-        date_el = (
-            card.select_one("[data-cy='card-posted-date']")
-            or card.select_one("span[class*='posted']")
-            or card.select_one("[class*='Posted']")
-            or card.select_one("[class*='date']")
-        )
-        date_posted = date_el.get_text(strip=True) if date_el else None
-
-        # --- Description snippet ---
-        snippet_el = (
-            card.select_one("[data-cy='card-summary']")
-            or card.select_one("[class*='summary']")
-            or card.select_one("[class*='description']")
-        )
-        snippet = snippet_el.get_text(separator=" ", strip=True) if snippet_el else None
+        # --- Employment type ---
+        # Stored in raw_html for now; "Contract", "Full-time", etc.
 
         return JobRecord(
             source="dice",
@@ -237,8 +290,8 @@ class DiceScraper(BaseScraper):
             location=location,
             salary_min=salary_min,
             salary_max=salary_max,
-            description=snippet,
-            raw_html=str(card)[:5000],  # cap raw HTML size
+            description=None,  # Enrichment fills this
+            raw_html=str(card)[:5000],
             date_posted=date_posted,
             status="new",
         )
@@ -265,12 +318,23 @@ class DiceScraper(BaseScraper):
 
     @staticmethod
     def _parse_salary_text(text: str) -> tuple[float | None, float | None]:
-        """Parse salary numbers from text like '$120,000 - $150,000/yr'."""
+        """Parse salary numbers from text like '$120,000 - $150,000/yr'
+        or 'USD 130,000.00 - 160,000.00 per year'.
+        """
         if not text:
             return None, None
 
-        # Find all dollar amounts
+        # Find all dollar amounts ($120,000 or $120,000.00)
         amounts = re.findall(r"\$[\d,]+(?:\.\d{2})?", text)
+
+        # Also match Dice's "USD 130,000.00" format (no $ sign)
+        if not amounts and "USD" in text.upper():
+            amounts = re.findall(r"[\d,]+\.\d{2}", text)
+
+        # Also match bare numbers with commas (e.g., "130,000 - 160,000")
+        if not amounts:
+            amounts = re.findall(r"[\d,]{5,}", text)
+
         if not amounts:
             return None, None
 
@@ -782,11 +846,8 @@ class DiceScraper(BaseScraper):
         """
         from app.scrapers.base import ScraperStats as _Stats
 
-        # Force Playwright-first for search pages — Dice is a React SPA
-        # and httpx will get an empty HTML shell
-        self.health.playwright_escalated = True
-        logger.info("[dice] Playwright-first mode enabled (React SPA)")
-
+        # Dice does SSR — httpx gets 180-350KB pages with rendered job cards.
+        # No need to force Playwright; let AdaptiveHealth escalate if needed.
         stats = await super().run()
 
         # Enrich jobs missing descriptions
