@@ -60,3 +60,4 @@ boards:
       Authorization-Key: "gl+MVXOcmu5LnsKcZfHSan7AncYVk+IsIkA/Xma2YI8="
       # REQUIRED: Your email address (used as User-Agent for API tracking)
       User-Agent: "jjones@mansa-tech.com"
+ 
