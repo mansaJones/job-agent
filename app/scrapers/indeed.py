@@ -472,8 +472,10 @@ class IndeedScraper(BaseScraper):
             # Fetch full description if missing or just a snippet
             if not job.description or len(job.description) < 200:
                 logger.info("[indeed] Enriching: %s", job.title)
+                # Save original length BEFORE enrich mutates the object
+                original_desc_len = len(job.description or "")
                 enriched_job = await self.enrich_job(job)
-                if enriched_job.description and len(enriched_job.description) > len(job.description or ""):
+                if enriched_job.description and len(enriched_job.description) > original_desc_len:
                     await self.db.conn.execute(
                         "UPDATE jobs SET description = ?, raw_html = ? WHERE id = ?",
                         (enriched_job.description, enriched_job.raw_html, job.id),

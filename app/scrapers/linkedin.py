@@ -639,10 +639,10 @@ class LinkedInScraper(BaseScraper):
                 continue
             if not job.description or len(job.description) < 200:
                 logger.info("[linkedin] Enriching: %s @ %s", job.title, job.company)
+                # Save original length BEFORE enrich mutates the object
+                original_desc_len = len(job.description or "")
                 enriched_job = await self.enrich_job(job)
-                if enriched_job.description and len(enriched_job.description) > len(
-                    job.description or ""
-                ):
+                if enriched_job.description and len(enriched_job.description) > original_desc_len:
                     await self.db.conn.execute(
                         "UPDATE jobs SET description = ?, salary_min = COALESCE(?, salary_min), "
                         "salary_max = COALESCE(?, salary_max) WHERE id = ?",
