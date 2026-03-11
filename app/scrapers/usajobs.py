@@ -330,12 +330,18 @@ class USAJobsScraper(BaseScraper):
     async def run(self) -> "ScraperStats":
         """Run the scraper. No enrichment step needed — the API returns
         full descriptions, salary, location in the search response.
+
+        Disables AdaptiveHealth halting since this is an official API —
+        empty results are normal for specific queries, not a sign of
+        HTML structure changes.
         """
+        # Disable halt behavior — API returning 0 results is fine,
+        # not an error condition like it would be for HTML scrapers
+        self.health.max_consecutive_empty = 999
+        self.health.max_consecutive_blocks = 999
+
         stats = await super().run()
 
-        total_with_desc = sum(
-            1 for _ in [True]  # placeholder — log stats
-        )
         logger.info("[usajobs] Scrape complete — descriptions included in search results, "
                      "no enrichment needed")
         return stats

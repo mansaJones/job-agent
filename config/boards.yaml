@@ -49,9 +49,16 @@ boards:
     enabled: true
     module: "app.scrapers.usajobs"
     base_url: "https://data.usajobs.gov"
-    # search_queries: inherited from profile.target_roles (lowercased)
-    # location: inherited from profile.preferences.location
-    # radius_miles: inherited from profile.preferences.max_commute_miles
+    # Override with government-style job titles (federal postings use different terminology)
+    search_queries:
+      - "software developer"
+      - "IT specialist"
+      - "web developer"
+      - "software engineering manager"
+      - "computer scientist"
+    # Location blank = nationwide; USAJobs has its own remote filter
+    location: ""
+    radius_miles: 0
     max_pages: 2                   # API returns 50/page, 2 pages = 100 per query
     delay_min: 2.0                 # Official API — no need to be slow
     delay_max: 5.0
