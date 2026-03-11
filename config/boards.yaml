@@ -32,19 +32,15 @@ boards:
     headers:
       Accept-Language: "en-US,en;q=0.9"
 
-  # Future scrapers — disabled until implemented
   dice:
-    enabled: false
+    enabled: true
     module: "app.scrapers.dice"
     base_url: "https://www.dice.com"
-    # Override search_queries for this board only (different role focus)
-    search_queries:
-      - "devops engineer"
-      - "cloud engineer"
-    # Override location for this board only
-    location: "Chicago, IL"
-    radius_miles: 40
+    # search_queries: inherited from profile.target_roles (lowercased)
+    # location: inherited from profile.preferences.location
+    # radius_miles: inherited from profile.preferences.max_commute_miles
     max_pages: 3
     delay_min: 10.0
-    delay_max: 30.0
-    headers: {}
+    delay_max: 25.0
+    headers:
+      Accept-Language: "en-US,en;q=0.9"
