@@ -44,3 +44,19 @@ boards:
     delay_max: 25.0
     headers:
       Accept-Language: "en-US,en;q=0.9"
+
+  usajobs:
+    enabled: true
+    module: "app.scrapers.usajobs"
+    base_url: "https://data.usajobs.gov"
+    # search_queries: inherited from profile.target_roles (lowercased)
+    # location: inherited from profile.preferences.location
+    # radius_miles: inherited from profile.preferences.max_commute_miles
+    max_pages: 2                   # API returns 50/page, 2 pages = 100 per query
+    delay_min: 2.0                 # Official API — no need to be slow
+    delay_max: 5.0
+    headers:
+      # REQUIRED: Get your API key at https://developer.usajobs.gov/APIRequest/Index
+      Authorization-Key: "gl+MVXOcmu5LnsKcZfHSan7AncYVk+IsIkA/Xma2YI8="
+      # REQUIRED: Your email address (used as User-Agent for API tracking)
+      User-Agent: "jjones@mansa-tech.com"
