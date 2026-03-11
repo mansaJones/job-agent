@@ -56,12 +56,17 @@ boards:
       - "web developer"
       - "software engineering manager"
       - "computer scientist"
+      - "application developer"
+      - "data engineer"
     # Location blank = nationwide; USAJobs has its own remote filter
     location: ""
-    radius_miles: 0
+    radius_miles: 0                # 0 = no radius filter (nationwide)
     max_pages: 2                   # API returns 50/page, 2 pages = 100 per query
     delay_min: 2.0                 # Official API — no need to be slow
     delay_max: 5.0
+    # Federal job descriptions are verbose boilerplate — only check titles
+    # for blacklist keywords (the LLM evaluator handles description filtering)
+    blacklist_scope: "title_only"
     headers:
       # REQUIRED: Get your API key at https://developer.usajobs.gov/APIRequest/Index
       Authorization-Key: "gl+MVXOcmu5LnsKcZfHSan7AncYVk+IsIkA/Xma2YI8="

@@ -521,16 +521,28 @@ class BaseScraper(ABC):
         return filepath
 
     def is_blacklisted(self, job: JobRecord) -> bool:
-        """Check if a job matches any blacklist rules."""
-        # Company blacklist
+        """Check if a job matches any blacklist rules.
+
+        Respects ``config.blacklist_scope``:
+          - "all" (default) — keywords checked against title + description
+          - "title_only" — keywords checked against title only
+            (useful for API scrapers where descriptions contain verbose
+            government boilerplate that triggers false positives)
+        """
+        # Company blacklist — always checked
         if job.company:
             company_lower = job.company.lower()
             for blocked in self.profile.blacklist.companies:
                 if blocked in company_lower:
                     return True
 
-        # Keyword blacklist — check title and description
-        text = f"{job.title} {job.description or ''}".lower()
+        # Keyword blacklist — scope depends on board config
+        scope = getattr(self.config, "blacklist_scope", "all")
+        if scope == "title_only":
+            text = (job.title or "").lower()
+        else:
+            text = f"{job.title} {job.description or ''}".lower()
+
         for keyword in self.profile.blacklist.keywords:
             if keyword in text:
                 return True

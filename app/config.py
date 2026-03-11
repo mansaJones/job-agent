@@ -86,11 +86,15 @@ class BoardConfig(BaseModel):
     base_url: str = ""
     search_queries: list[str] = Field(default_factory=list)
     location: str = ""
-    radius_miles: int = 25
+    radius_miles: int | None = None  # None = inherit from profile; 0 = no radius filter
     max_pages: int = 3
     delay_min: float = 10.0
     delay_max: float = 30.0
     headers: dict[str, str] = Field(default_factory=dict)
+    # Blacklist scope: "all" checks title+description (default),
+    # "title_only" checks only the title (useful for API scrapers
+    # where descriptions contain verbose boilerplate).
+    blacklist_scope: str = "all"
 
 
 class BoardsConfig(BaseModel):
@@ -195,7 +199,7 @@ def _resolve_board_defaults(boards: BoardsConfig, profile: ProfileConfig) -> Non
             logger.debug("Board '%s': inherited location '%s' from profile",
                          board.name, board.location)
 
-        if board.radius_miles == 0:
+        if board.radius_miles is None:
             board.radius_miles = profile.preferences.max_commute_miles
             logger.debug("Board '%s': inherited radius %d mi from profile",
                          board.name, board.radius_miles)

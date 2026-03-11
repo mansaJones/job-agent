@@ -73,13 +73,16 @@ class USAJobsScraper(BaseScraper):
         """
         params: dict[str, str | int] = {
             "Keyword": query,
-            "LocationName": location,
             "ResultsPerPage": self.RESULTS_PER_PAGE,
             "Page": page + 1,  # USAJobs is 1-indexed; base run() sends 0-indexed
         }
 
-        # Add radius if configured
-        if self.config.radius_miles:
+        # Only include LocationName if actually set (empty string = nationwide)
+        if location:
+            params["LocationName"] = location
+
+        # Add radius if configured (and location is present)
+        if self.config.radius_miles and location:
             params["Radius"] = self.config.radius_miles
 
         # Remote jobs filter
