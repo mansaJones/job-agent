@@ -451,8 +451,19 @@ class DiceScraper(BaseScraper):
     # Link-based fallback parsing
     # ------------------------------------------------------------------
 
+    # Words that indicate a button/CTA, not a real job title
+    _JUNK_TITLES = frozenset({
+        "easy apply", "apply now", "apply", "save", "save job",
+        "share", "report", "hide", "view details", "see more",
+        "sign in", "log in", "register",
+    })
+
     def _parse_from_links(self, soup: BeautifulSoup) -> list[JobRecord]:
-        """Last resort: find all links to /job-detail/ and build minimal records."""
+        """Last resort: find all links to /job-detail/ and build minimal records.
+
+        Tries to extract the real job title and company from the surrounding
+        card context rather than just the link text (which is often a button).
+        """
         jobs: list[JobRecord] = []
         seen_urls: set[str] = set()
 
@@ -468,28 +479,98 @@ class DiceScraper(BaseScraper):
                 continue
             seen_urls.add(url)
 
-            title = a_tag.get_text(strip=True)
-            if not title or len(title) < 3:
-                continue
-
             external_id = self._extract_job_id(url)
+
+            # Try to get the real title — walk up to find the card container
+            title, company, location = self._extract_card_context(a_tag)
+
+            # If we still don't have a title, use the link text as fallback
+            if not title:
+                link_text = a_tag.get_text(strip=True)
+                if link_text and link_text.lower() not in self._JUNK_TITLES and len(link_text) > 5:
+                    title = link_text
+
+            if not title:
+                continue
 
             jobs.append(JobRecord(
                 source="dice",
                 external_id=external_id,
                 url=url,
                 title=title,
-                company=None,
-                location=None,
+                company=company,
+                location=location,
                 salary_min=None,
                 salary_max=None,
                 description=None,
-                raw_html=str(a_tag.parent)[:3000] if a_tag.parent else str(a_tag),
+                raw_html=str(a_tag.parent.parent)[:5000] if a_tag.parent and a_tag.parent.parent else str(a_tag),
                 date_posted=None,
                 status="new",
             ))
 
         return jobs
+
+    def _extract_card_context(self, a_tag: Tag) -> tuple[str | None, str | None, str | None]:
+        """Walk up from a job-detail link to find the enclosing card, then
+        extract title, company, and location from its siblings/children.
+        """
+        title, company, location = None, None, None
+
+        # Walk up a few levels to find a card-like container
+        card = a_tag
+        for _ in range(5):
+            if card.parent is None:
+                break
+            card = card.parent
+            # Stop if we hit something that looks like a card boundary
+            classes = " ".join(card.get("class", []))
+            if any(kw in classes.lower() for kw in ("card", "result", "listing", "row")):
+                break
+
+        if card is a_tag:
+            return None, None, None
+
+        # Inside the card, look for title-like elements
+        for sel in ["h5 a", "h4 a", "h3 a", "a[data-cy*='title']",
+                     "a[class*='title']", "a[class*='Title']"]:
+            el = card.select_one(sel)
+            if el:
+                text = el.get_text(strip=True)
+                if text and text.lower() not in self._JUNK_TITLES and len(text) > 5:
+                    title = text
+                    break
+
+        # If no title from selectors, try the first <a> with /job-detail/ that has real text
+        if not title:
+            for link in card.find_all("a", href=True):
+                if "/job-detail/" in str(link.get("href", "")):
+                    text = link.get_text(strip=True)
+                    if text and text.lower() not in self._JUNK_TITLES and len(text) > 5:
+                        title = text
+                        break
+
+        # Company — look for common patterns
+        for sel in ["[data-cy*='company']", "[class*='company']",
+                     "[class*='Company']", "a[href*='/company/']",
+                     "span[class*='employer']"]:
+            el = card.select_one(sel)
+            if el:
+                text = el.get_text(strip=True)
+                if text and len(text) > 1:
+                    company = text
+                    break
+
+        # Location
+        for sel in ["[data-cy*='location']", "[class*='location']",
+                     "[class*='Location']"]:
+            el = card.select_one(sel)
+            if el:
+                text = el.get_text(strip=True)
+                if text and len(text) > 1:
+                    location = text
+                    break
+
+        return title, company, location
 
     # ------------------------------------------------------------------
     # Detail page enrichment
