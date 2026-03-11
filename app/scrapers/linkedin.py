@@ -178,6 +178,12 @@ class LinkedInScraper(BaseScraper):
 
         # Normalize URL — strip tracking params
         url = self._clean_url(href)
+
+        # Reject non-job URLs (company pages, profiles, etc.)
+        if not self._is_job_url(url):
+            logger.debug("[linkedin] Skipping non-job URL: %s", url)
+            return None
+
         external_id = self._extract_job_id(url) or self._extract_id_from_urn(
             str(card.get("data-entity-urn", ""))
         )
@@ -236,9 +242,29 @@ class LinkedInScraper(BaseScraper):
 
     @staticmethod
     def _extract_job_id(url: str) -> str | None:
-        """Extract LinkedIn's numeric job ID from a URL like /jobs/view/12345678/."""
-        match = re.search(r"/jobs/view/(\d+)", url)
-        return match.group(1) if match else None
+        """Extract LinkedIn's numeric job ID from a URL.
+
+        Handles both formats:
+          - /jobs/view/12345678/             (clean numeric)
+          - /jobs/view/some-title-slug-12345678  (slug with trailing ID)
+        """
+        # Try clean numeric first: /jobs/view/12345678
+        match = re.search(r"/jobs/view/(\d+)/?$", url)
+        if match:
+            return match.group(1)
+
+        # Slug-style: /jobs/view/senior-engineer-at-google-12345678
+        # The numeric job ID is always the last number in the slug
+        match = re.search(r"/jobs/view/[^?/]+-(\d{5,})/?", url)
+        if match:
+            return match.group(1)
+
+        # Last resort: just find any long number sequence in a /jobs/view/ URL
+        match = re.search(r"/jobs/view/.*?(\d{5,})", url)
+        if match:
+            return match.group(1)
+
+        return None
 
     @staticmethod
     def _extract_id_from_urn(urn: str) -> str | None:
@@ -247,16 +273,26 @@ class LinkedInScraper(BaseScraper):
         return match.group(1) if match else None
 
     @staticmethod
+    def _is_job_url(url: str) -> bool:
+        """Check if a URL is actually a job listing (not a company page, profile, etc)."""
+        return "/jobs/view/" in url
+
+    @staticmethod
     def _clean_url(url: str) -> str:
         """Strip tracking params from LinkedIn job URLs.
 
-        Keeps the clean /jobs/view/{id}/ form.
+        Handles both formats:
+          - /jobs/view/12345678/?tracking=stuff  → /jobs/view/12345678/
+          - /jobs/view/slug-title-12345678?stuff  → /jobs/view/slug-title-12345678
         """
-        match = re.search(r"(https?://[^?]+/jobs/view/\d+/?)", url)
-        if match:
-            return match.group(1)
-        # If it doesn't match the expected pattern, return as-is minus query string
-        return url.split("?")[0]
+        # Strip query params first
+        clean = url.split("?")[0]
+
+        # If it's a /jobs/view/ URL, keep it as-is (with or without slug)
+        if "/jobs/view/" in clean:
+            return clean
+
+        return clean
 
     # ------------------------------------------------------------------
     # Salary parsing
