@@ -26,10 +26,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EvalThresholds:
-    """Score thresholds for auto-categorization."""
-    ready_for_review: float = 0.7   # score >= this → "evaluated" (ready for review)
-    maybe: float = 0.4              # score >= this → "maybe"
-    auto_reject: float = 0.4        # score < this → "rejected"
+    """Score thresholds for auto-categorization.
+
+    Tuned down from 0.7/0.4 because the 3B model consistently underscores
+    by ~0.25 — its reasoning is solid but the numbers are deflated.
+    """
+    ready_for_review: float = 0.55  # score >= this → "evaluated" (ready for review)
+    maybe: float = 0.25             # score >= this → "maybe"
+    auto_reject: float = 0.25       # score < this → "rejected"
 
 
 # ---------------------------------------------------------------------------
