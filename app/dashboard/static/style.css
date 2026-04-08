@@ -251,6 +251,20 @@ tbody td {
 .btn-yellow:hover { background: var(--yellow); color: #000; }
 .btn-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red); }
 .btn-red:hover { background: var(--red); color: white; }
+.btn-blue { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue); }
+.btn-blue:hover { background: var(--blue); color: white; }
+.btn-xs { padding: 0.15rem 0.5rem; font-size: 0.75rem; line-height: 1.2; min-width: 1.5rem; }
+
+/* Action buttons in job table rows */
+.action-buttons {
+    display: flex;
+    gap: 0.25rem;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
+
+/* Fade out row on HTMX swap */
+tr.htmx-swapping { opacity: 0; transition: opacity 0.3s ease-out; }
 .btn-ghost {
     background: transparent;
     color: var(--text-secondary);

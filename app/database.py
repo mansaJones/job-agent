@@ -355,7 +355,7 @@ class Database:
         await self.conn.commit()
 
         # Also update the job status to match the decision
-        status_map = {"approved": "approved", "rejected": "rejected", "maybe": "evaluated"}
+        status_map = {"approved": "approved", "rejected": "rejected", "maybe": "maybe", "applied": "applied"}
         new_status = status_map.get(decision.decision, decision.decision)
         await self.update_job_status(decision.job_id, new_status)
 

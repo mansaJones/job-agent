@@ -36,6 +36,13 @@
        hx-push-url="true">
         Approved <span class="count">{{ stats.get('approved', 0) }}</span>
     </a>
+    <a href="/jobs?status=applied"
+       class="filter-tab {% if current_status == 'applied' %}active{% endif %}"
+       hx-get="/jobs?status=applied"
+       hx-target="#job-list"
+       hx-push-url="true">
+        Applied <span class="count">{{ stats.get('applied', 0) }}</span>
+    </a>
     <a href="/jobs?status=rejected"
        class="filter-tab {% if current_status == 'rejected' %}active{% endif %}"
        hx-get="/jobs?status=rejected"

@@ -10,12 +10,12 @@
                     <th>Salary</th>
                     <th>Score</th>
                     <th>Status</th>
-                    <th>Reason</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
                 {% for job in jobs %}
-                <tr>
+                <tr id="job-row-{{ job.id }}">
                     <td><a href="/jobs/{{ job.id }}" class="job-title-link">{{ job.title }}</a></td>
                     <td class="company-text">{{ job.company or 'N/A' }}</td>
                     <td>{{ job.location or 'N/A' }}</td>
@@ -42,8 +42,39 @@
                         <span class="badge badge-neutral">{{ job.status }}</span>
                         {% endif %}
                     </td>
-                    <td class="reason-text" title="{{ job.rejection_reason or '' }}">
-                        {{ (job.rejection_reason or '')[:50] }}
+                    <td class="action-buttons">
+                        {% if job.status != 'approved' %}
+                        <button class="btn btn-green btn-xs"
+                                hx-post="/api/jobs/{{ job.id }}/decide"
+                                hx-vals='{"decision": "approved", "notes": ""}'
+                                hx-target="#job-row-{{ job.id }}"
+                                hx-swap="outerHTML swap:0.3s"
+                                title="Approve">&#10003;</button>
+                        {% endif %}
+                        {% if job.status != 'maybe' %}
+                        <button class="btn btn-yellow btn-xs"
+                                hx-post="/api/jobs/{{ job.id }}/decide"
+                                hx-vals='{"decision": "maybe", "notes": ""}'
+                                hx-target="#job-row-{{ job.id }}"
+                                hx-swap="outerHTML swap:0.3s"
+                                title="Maybe">?</button>
+                        {% endif %}
+                        {% if job.status != 'rejected' %}
+                        <button class="btn btn-red btn-xs"
+                                hx-post="/api/jobs/{{ job.id }}/decide"
+                                hx-vals='{"decision": "rejected", "notes": ""}'
+                                hx-target="#job-row-{{ job.id }}"
+                                hx-swap="outerHTML swap:0.3s"
+                                title="Reject">&#10007;</button>
+                        {% endif %}
+                        {% if job.status != 'applied' %}
+                        <button class="btn btn-blue btn-xs"
+                                hx-post="/api/jobs/{{ job.id }}/decide"
+                                hx-vals='{"decision": "applied", "notes": ""}'
+                                hx-target="#job-row-{{ job.id }}"
+                                hx-swap="outerHTML swap:0.3s"
+                                title="Applied">&#9993;</button>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}

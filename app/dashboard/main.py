@@ -256,7 +256,7 @@ async def api_decide(request: Request, job_id: int, body: DecisionRequest):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if body.decision not in ("approved", "rejected", "maybe"):
+    if body.decision not in ("approved", "rejected", "maybe", "applied"):
         raise HTTPException(status_code=400, detail="Invalid decision")
 
     record = DecisionRecord(
@@ -268,13 +268,18 @@ async def api_decide(request: Request, job_id: int, body: DecisionRequest):
 
     logger.info("Decision: job #%d → %s", job_id, body.decision)
 
-    # If HTMX, return the updated badge partial
     if request.headers.get("HX-Request"):
-        job_data = await db.get_job_with_evaluation(job_id)
-        return templates.TemplateResponse("partials/decision_badge.html", {
-            "request": request,
-            "job": job_data,
-        })
+        # If the request came from the job detail page (decision-area),
+        # return the updated badge partial
+        hx_target = request.headers.get("HX-Target", "")
+        if hx_target == "decision-area":
+            job_data = await db.get_job_with_evaluation(job_id)
+            return templates.TemplateResponse("partials/decision_badge.html", {
+                "request": request,
+                "job": job_data,
+            })
+        # If from the job table row, return empty string to remove the row
+        return HTMLResponse("")
 
     return {"status": "ok", "job_id": job_id, "decision": body.decision}
 
