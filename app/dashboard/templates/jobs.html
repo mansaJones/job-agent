@@ -63,4 +63,13 @@
 <div id="job-list">
     {% include "partials/job_table.html" %}
 </div>
+
+<script>
+document.querySelectorAll('.filter-tabs .filter-tab').forEach(tab => {
+    tab.addEventListener('click', function() {
+        document.querySelectorAll('.filter-tabs .filter-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+    });
+});
+</script>
 {% endblock %}
