@@ -68,7 +68,7 @@
                                 title="Reject">&#10007;</button>
                         {% endif %}
                         {% if job.status != 'applied' %}
-                        <button class="btn btn-primary btn-xs"
+                        <button class="btn btn-blue btn-xs"
                                 hx-post="/api/jobs/{{ job.id }}/decide"
                                 hx-vals='{"decision": "applied", "notes": ""}'
                                 hx-target="#job-row-{{ job.id }}"
