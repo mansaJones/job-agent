@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -243,30 +243,50 @@ async def api_job_detail(job_id: int):
 
 
 class DecisionRequest(BaseModel):
-    decision: str  # approved, rejected, maybe
+    decision: str  # approved, rejected, maybe, applied
     notes: str = ""
 
 
 @app.post("/api/jobs/{job_id}/decide")
-async def api_decide(request: Request, job_id: int, body: DecisionRequest):
-    """Record a decision on a job (approve/reject/maybe)."""
+async def api_decide(
+    request: Request,
+    job_id: int,
+    decision: str | None = Form(None),
+    notes: str | None = Form(None),
+):
+    """Record a decision on a job (approve/reject/maybe/applied).
+
+    Accepts both form-encoded (HTMX hx-vals) and JSON request bodies.
+    """
     db = get_db()
+
+    # Parse from form data or fall back to JSON body
+    if decision is not None:
+        dec = decision
+        dec_notes = notes or ""
+    else:
+        try:
+            body = await request.json()
+            dec = body.get("decision", "")
+            dec_notes = body.get("notes", "")
+        except Exception:
+            raise HTTPException(status_code=400, detail="No decision provided")
 
     job = await db.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if body.decision not in ("approved", "rejected", "maybe", "applied"):
-        raise HTTPException(status_code=400, detail="Invalid decision")
+    if dec not in ("approved", "rejected", "maybe", "applied"):
+        raise HTTPException(status_code=400, detail=f"Invalid decision: {dec}")
 
     record = DecisionRecord(
         job_id=job_id,
-        decision=body.decision,
-        notes=body.notes,
+        decision=dec,
+        notes=dec_notes,
     )
     await db.insert_decision(record)
 
-    logger.info("Decision: job #%d → %s", job_id, body.decision)
+    logger.info("Decision: job #%d → %s", job_id, dec)
 
     if request.headers.get("HX-Request"):
         # If the request came from the job detail page (decision-area),
@@ -281,7 +301,7 @@ async def api_decide(request: Request, job_id: int, body: DecisionRequest):
         # If from the job table row, return empty string to remove the row
         return HTMLResponse("")
 
-    return {"status": "ok", "job_id": job_id, "decision": body.decision}
+    return {"status": "ok", "job_id": job_id, "decision": dec}
 
 
 @app.post("/api/scrape")
