@@ -187,7 +187,31 @@ CREATE INDEX IF NOT EXISTS idx_apply_queue_status
 POST_MIGRATION_SQL = """
 CREATE INDEX IF NOT EXISTS idx_jobs_lane
     ON jobs(search_lane);
+-- At most one active apply request per job (enforced even under races)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_apply_queue_active_job
+    ON apply_queue(job_id) WHERE status IN ('pending', 'claimed', 'in_progress');
 """
+
+# Apply queue lifecycle: pending → claimed → in_progress → completed | abandoned | failed
+APPLY_ACTIVE_STATUSES = ("pending", "claimed", "in_progress")
+APPLY_PROGRESS_STATUSES = ("claimed", "in_progress")
+APPLY_FINAL_STATUSES = ("completed", "abandoned", "failed")
+
+_APPLY_SELECT = """
+    SELECT q.*,
+           j.title AS job_title, j.company AS job_company, j.url AS job_url,
+           j.source AS job_source, j.description AS job_description,
+           j.status AS job_status,
+           r.file_path AS resume_path, c.file_path AS cover_letter_path
+    FROM apply_queue q
+    JOIN jobs j ON j.id = q.job_id
+    LEFT JOIN generated_documents r ON r.id = q.resume_doc_id
+    LEFT JOIN generated_documents c ON c.id = q.cover_letter_doc_id
+"""
+
+
+class ApplyQueueError(ValueError):
+    """An apply queue operation conflicts with the row's current state."""
 
 # Correlated subquery (references outer `j`) picking the evaluation to show for
 # a job: the latest eval per lane, then the highest-scoring of those. A job
@@ -253,6 +277,13 @@ class Database:
             ("evaluations", "search_lane", "ALTER TABLE evaluations ADD COLUMN search_lane TEXT"),
             ("generated_documents", "updated_at",
              "ALTER TABLE generated_documents ADD COLUMN updated_at TEXT"),
+            ("apply_queue", "search_lane", "ALTER TABLE apply_queue ADD COLUMN search_lane TEXT"),
+            ("apply_queue", "ats_detected", "ALTER TABLE apply_queue ADD COLUMN ats_detected TEXT"),
+            ("apply_queue", "fields_filled",
+             "ALTER TABLE apply_queue ADD COLUMN fields_filled INTEGER"),
+            ("apply_queue", "fields_flagged",
+             "ALTER TABLE apply_queue ADD COLUMN fields_flagged INTEGER"),
+            ("apply_queue", "apply_url", "ALTER TABLE apply_queue ADD COLUMN apply_url TEXT"),
         ]
         for table, column, ddl in migrations:
             cursor = await self.conn.execute(f"PRAGMA table_info({table})")
@@ -546,6 +577,152 @@ class Database:
             (job_id, search_lane, doc_type),
         )
         await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Apply queue
+    # ------------------------------------------------------------------
+
+    async def enqueue_apply(
+        self,
+        job_id: int,
+        search_lane: str,
+        resume_doc_id: int | None,
+        cover_letter_doc_id: int | None,
+    ) -> int:
+        """Queue a job for the apply client. Raises ApplyQueueError if one is already active."""
+        active = await self.get_active_apply_request(job_id)
+        if active:
+            raise ApplyQueueError(
+                f"Job #{job_id} already has an active apply request (#{active['id']}, "
+                f"{active['status']})"
+            )
+        try:
+            cursor = await self.conn.execute(
+                "INSERT INTO apply_queue (job_id, search_lane, status, resume_doc_id, "
+                "cover_letter_doc_id) VALUES (?, ?, 'pending', ?, ?)",
+                (job_id, search_lane, resume_doc_id, cover_letter_doc_id),
+            )
+            await self.conn.commit()
+        except aiosqlite.IntegrityError as e:
+            raise ApplyQueueError(f"Job #{job_id} already has an active apply request") from e
+        logger.info("Queued job #%d [%s] for apply (queue #%d)",
+                    job_id, search_lane, cursor.lastrowid)
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    async def get_apply_request(self, queue_id: int) -> dict | None:
+        """One queue row joined with its job and documents."""
+        cursor = await self.conn.execute(f"{_APPLY_SELECT} WHERE q.id = ?", (queue_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_active_apply_request(self, job_id: int) -> dict | None:
+        """The job's pending/claimed/in_progress queue row, if any."""
+        placeholders = ", ".join("?" for _ in APPLY_ACTIVE_STATUSES)
+        cursor = await self.conn.execute(
+            f"SELECT * FROM apply_queue WHERE job_id = ? AND status IN ({placeholders}) "
+            "ORDER BY id DESC LIMIT 1",
+            (job_id, *APPLY_ACTIVE_STATUSES),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_latest_apply_request(self, job_id: int) -> dict | None:
+        """The job's most recent queue row, in any status."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM apply_queue WHERE job_id = ? ORDER BY id DESC LIMIT 1", (job_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_pending_apply_requests(self) -> list[dict]:
+        """Pending requests, oldest first, joined with job + document paths."""
+        cursor = await self.conn.execute(
+            f"{_APPLY_SELECT} WHERE q.status = 'pending' ORDER BY q.queued_at, q.id"
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def claim_apply_request(self, queue_id: int) -> dict | None:
+        """Atomically claim a pending request. Returns the row, or None if someone beat us."""
+        cursor = await self.conn.execute(
+            "UPDATE apply_queue SET status = 'claimed', started_at = datetime('now') "
+            "WHERE id = ? AND status = 'pending'",
+            (queue_id,),
+        )
+        await self.conn.commit()
+        if cursor.rowcount != 1:
+            return None
+        return await self.get_apply_request(queue_id)
+
+    async def update_apply_progress(
+        self,
+        queue_id: int,
+        status: str,
+        ats_detected: str | None = None,
+        apply_url: str | None = None,
+        fields_filled: int | None = None,
+        fields_flagged: int | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Record client progress on a claimed request. Terminal states go through complete."""
+        if status not in APPLY_PROGRESS_STATUSES:
+            raise ApplyQueueError(
+                f"Progress status must be one of {', '.join(APPLY_PROGRESS_STATUSES)}")
+        sets, params = ["status = ?"], [status]
+        for column, value in (("ats_detected", ats_detected), ("apply_url", apply_url),
+                              ("fields_filled", fields_filled),
+                              ("fields_flagged", fields_flagged), ("notes", notes)):
+            if value is not None:
+                sets.append(f"{column} = ?")
+                params.append(value)
+        placeholders = ", ".join("?" for _ in APPLY_PROGRESS_STATUSES)
+        cursor = await self.conn.execute(
+            f"UPDATE apply_queue SET {', '.join(sets)} "
+            f"WHERE id = ? AND status IN ({placeholders})",
+            (*params, queue_id, *APPLY_PROGRESS_STATUSES),
+        )
+        await self.conn.commit()
+        if cursor.rowcount != 1:
+            raise ApplyQueueError(f"Apply request #{queue_id} is not claimed")
+
+    async def complete_apply_request(self, queue_id: int, status: str, notes: str | None) -> None:
+        """Finish a request. 'completed' also records the application and marks the job applied."""
+        if status not in APPLY_FINAL_STATUSES:
+            raise ApplyQueueError(
+                f"Result status must be one of {', '.join(APPLY_FINAL_STATUSES)}")
+        placeholders = ", ".join("?" for _ in APPLY_ACTIVE_STATUSES)
+        cursor = await self.conn.execute(
+            f"UPDATE apply_queue SET status = ?, notes = COALESCE(?, notes), "
+            f"completed_at = datetime('now') WHERE id = ? AND status IN ({placeholders})",
+            (status, notes, queue_id, *APPLY_ACTIVE_STATUSES),
+        )
+        await self.conn.commit()
+        if cursor.rowcount != 1:
+            # Also guards against a retried result call recording a second application
+            raise ApplyQueueError(f"Apply request #{queue_id} is not active")
+
+        if status == "completed":
+            row = await self.get_apply_request(queue_id)
+            await self.insert_applied(AppliedRecord(job_id=row["job_id"], method="assisted"))
+        logger.info("Apply request #%d finished: %s", queue_id, status)
+
+    async def get_apply_queue(self, limit: int = 50) -> list[dict]:
+        """All queue rows, newest first, with job title/company."""
+        cursor = await self.conn.execute(
+            f"{_APPLY_SELECT} ORDER BY q.id DESC LIMIT ?", (limit,)
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+
+    async def reset_stale_claims(self, max_age_minutes: int = 30) -> int:
+        """Return claimed/in_progress rows older than N minutes to pending (client died)."""
+        cursor = await self.conn.execute(
+            "UPDATE apply_queue SET status = 'pending', started_at = NULL, "
+            "notes = TRIM(COALESCE(notes, '') || ' [stale claim reset]') "
+            "WHERE status IN ('claimed', 'in_progress') "
+            "AND started_at < datetime('now', ?)",
+            (f"-{int(max_age_minutes)} minutes",),
+        )
+        await self.conn.commit()
+        return cursor.rowcount
 
     # ------------------------------------------------------------------
     # Stats

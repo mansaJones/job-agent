@@ -10,18 +10,22 @@ import asyncio
 import importlib
 import logging
 import re
+import secrets
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, Query, Request,
+)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.config import load_settings, AppSettings
-from app.database import Database, DecisionRecord
+from app.database import ApplyQueueError, Database, DecisionRecord
 from app.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -325,6 +329,7 @@ async def job_detail_page(request: Request, job_id: int):
         "doc_lanes": doc_lanes,
         "existing_resumes": existing_resumes,
         "existing_cover_letters": existing_cover_letters,
+        "apply_request": await db.get_latest_apply_request(job_id),
         # Legacy evaluations.cover_letter_draft only shows until letters are migrated
         "show_legacy_cover_letter": bool(job.get("cover_letter")) and not has_cover_letter_rows,
     })
@@ -658,6 +663,255 @@ async def api_download_cover_letter(job_id: int, lane: str, fmt: str = Query("pd
     }
     filename = await _download_filename(db, job_id, "cover_letter", fmt)
     return FileResponse(path, media_type=media_types[fmt], filename=filename)
+
+
+# ---------------------------------------------------------------------------
+# Apply queue — dashboard side (no token, like the rest of the dashboard)
+# ---------------------------------------------------------------------------
+
+def _elapsed(row: dict) -> str:
+    """Human elapsed time for a queue row: queued/started → completed (or now)."""
+    start = row.get("started_at") or row.get("queued_at")
+    if not start:
+        return ""
+    end = row.get("completed_at")
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        t0 = datetime.strptime(start, fmt).replace(tzinfo=timezone.utc)
+        t1 = (datetime.strptime(end, fmt).replace(tzinfo=timezone.utc) if end
+              else datetime.now(timezone.utc))
+    except ValueError:
+        return ""
+    minutes = int((t1 - t0).total_seconds() // 60)
+    return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
+
+
+async def _apply_queue_ctx(request: Request) -> dict[str, Any]:
+    rows = await get_db().get_apply_queue(limit=50)
+    for row in rows:
+        row["elapsed"] = _elapsed(row)
+    return {
+        "request": request,
+        "rows": rows,
+        "any_active": any(r["status"] in ("claimed", "in_progress") for r in rows),
+    }
+
+
+@app.get("/apply-queue", response_class=HTMLResponse)
+async def apply_queue_page(request: Request):
+    """Apply queue page — the table partial refreshes itself while anything is running."""
+    ctx = await _apply_queue_ctx(request)
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/apply_queue_table.html", ctx)
+    return templates.TemplateResponse(request, "apply_queue.html", ctx)
+
+
+@app.post("/api/apply-queue/reset-stale")
+async def api_apply_queue_reset_stale(request: Request):
+    """Send claims the client abandoned back to pending."""
+    count = await get_db().reset_stale_claims()
+    logger.info("Reset %d stale apply claim(s) from the dashboard", count)
+    ctx = await _apply_queue_ctx(request)
+    ctx["flash"] = f"Reset {count} stale claim(s)"
+    return templates.TemplateResponse(request, "partials/apply_queue_table.html", ctx)
+
+
+@app.post("/api/jobs/{job_id}/queue-apply")
+async def api_queue_apply(
+    request: Request,
+    job_id: int,
+    lane: str | None = Form(None),
+    force: str | None = Form(None),
+):
+    """Run pre-flight and queue the job for the apply client if it passes."""
+    from app.applicator.preflight import has_blockers, preflight_and_enqueue
+
+    lane, force_flag = await _lane_and_force(request, lane, force)
+    if not lane:
+        return _error_badge(request, "No lane provided")
+
+    db = get_db()
+    try:
+        checks, queue_id = await preflight_and_enqueue(db, get_settings(), job_id, lane,
+                                                       force=force_flag)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except (ValueError, ApplyQueueError) as e:
+        return _error_badge(request, str(e), status_code=409)
+
+    if request.headers.get("HX-Request"):
+        if queue_id is not None:
+            return templates.TemplateResponse(request, "partials/apply_status.html", {
+                "request": request, "apply_request": await db.get_latest_apply_request(job_id),
+                "just_queued": True,
+            })
+        return templates.TemplateResponse(request, "partials/apply_preflight.html", {
+            "request": request, "job_id": job_id, "lane": lane, "checks": checks,
+            "blocked": has_blockers(checks),
+        })
+
+    return {
+        "queued": queue_id is not None,
+        "queue_id": queue_id,
+        "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail, "severity": c.severity}
+                   for c in checks],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Apply queue — client API (Windows apply client, X-Apply-Token required)
+# ---------------------------------------------------------------------------
+
+async def require_apply_token(x_apply_token: str | None = Header(None)) -> None:
+    """Shared-secret auth for the apply client. 503 until a token is configured."""
+    expected = get_settings().secrets.apply_client_token
+    if not expected:
+        raise HTTPException(status_code=503, detail="apply_client_token not configured")
+    if not x_apply_token or not secrets.compare_digest(
+        x_apply_token.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Apply-Token")
+
+
+apply_api = APIRouter(prefix="/api/apply-queue", dependencies=[Depends(require_apply_token)])
+
+APPLY_DOC_TYPES = {"resume": "resume_path", "cover_letter": "cover_letter_path"}
+
+
+class ApplyProgress(BaseModel):
+    status: str
+    ats_detected: str | None = None
+    apply_url: str | None = None
+    fields_filled: int | None = None
+    fields_flagged: int | None = None
+    notes: str | None = None
+
+
+class ApplyResult(BaseModel):
+    status: str  # completed | abandoned | failed
+    notes: str | None = None
+
+
+def _applicant_payload() -> tuple[dict | None, str | None]:
+    from app.applicator.applicant_data import build_applicant_data
+    from app.resume_generator.linkedin_parser import load_linkedin_data
+
+    try:
+        return build_applicant_data(get_settings(), load_linkedin_data()).model_dump(), None
+    except (FileNotFoundError, ValueError) as e:
+        return None, str(e)
+
+
+def _apply_request_payload(row: dict, applicant: dict | None,
+                           applicant_error: str | None) -> dict[str, Any]:
+    qid = row["id"]
+    base = f"/api/apply-queue/{qid}/documents"
+    return {
+        "queue_id": qid,
+        "job_id": row["job_id"],
+        "lane": row["search_lane"],
+        "status": row["status"],
+        "queued_at": row["queued_at"],
+        "job": {
+            "title": row["job_title"],
+            "company": row["job_company"],
+            "url": row["job_url"],
+            "source": row["job_source"],
+            "description": (row["job_description"] or "")[:2000],
+        },
+        "applicant": applicant,
+        "applicant_error": applicant_error,
+        "documents": {
+            doc_type: {fmt: f"{base}/{doc_type}?fmt={fmt}" for fmt in ("pdf", "docx")}
+            for doc_type, col in APPLY_DOC_TYPES.items() if row.get(col)
+        },
+    }
+
+
+@apply_api.get("/health")
+async def api_apply_health():
+    return {"ok": True, "pending": len(await get_db().get_pending_apply_requests())}
+
+
+@apply_api.get("/pending")
+async def api_apply_pending():
+    rows = await get_db().get_pending_apply_requests()
+    applicant, error = _applicant_payload() if rows else (None, None)
+    return [_apply_request_payload(r, applicant, error) for r in rows]
+
+
+@apply_api.post("/{queue_id}/claim")
+async def api_apply_claim(queue_id: int):
+    db = get_db()
+    if await db.get_apply_request(queue_id) is None:
+        raise HTTPException(status_code=404, detail="Apply request not found")
+    row = await db.claim_apply_request(queue_id)
+    if row is None:
+        raise HTTPException(status_code=409, detail="Already claimed or not pending")
+    applicant, error = _applicant_payload()
+    return _apply_request_payload(row, applicant, error)
+
+
+@apply_api.get("/{queue_id}/documents/{doc_type}")
+async def api_apply_document(queue_id: int, doc_type: str, fmt: str = Query("pdf")):
+    if doc_type not in APPLY_DOC_TYPES:
+        raise HTTPException(status_code=404, detail="doc_type must be resume or cover_letter")
+    if fmt not in ("pdf", "docx"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf or docx")
+    db = get_db()
+    row = await db.get_apply_request(queue_id)
+    if row is None or not row.get(APPLY_DOC_TYPES[doc_type]):
+        raise HTTPException(status_code=404, detail="Apply request or document not found")
+    path = Path(row[APPLY_DOC_TYPES[doc_type]]).with_suffix(f".{fmt}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Document file missing on the Jetson")
+    media_type = (
+        "application/pdf" if fmt == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    filename = await _download_filename(db, row["job_id"], doc_type, fmt)
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@apply_api.post("/{queue_id}/progress")
+async def api_apply_progress(queue_id: int, body: ApplyProgress):
+    db = get_db()
+    if await db.get_apply_request(queue_id) is None:
+        raise HTTPException(status_code=404, detail="Apply request not found")
+    try:
+        await db.update_apply_progress(queue_id, **body.model_dump())
+    except ApplyQueueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True}
+
+
+@apply_api.post("/{queue_id}/result")
+async def api_apply_result(queue_id: int, body: ApplyResult):
+    db = get_db()
+    if await db.get_apply_request(queue_id) is None:
+        raise HTTPException(status_code=404, detail="Apply request not found")
+    try:
+        await db.complete_apply_request(queue_id, body.status, body.notes)
+    except ApplyQueueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    row = await db.get_apply_request(queue_id)
+    from app.notifier.telegram import TelegramNotifier
+
+    notifier = TelegramNotifier.from_secrets(get_settings().secrets)
+    if notifier is not None:
+        try:
+            async with notifier as n:
+                await n.send_apply_result(
+                    row["job_title"], row["job_company"], body.status,
+                    row["fields_filled"], row["fields_flagged"], body.notes,
+                )
+        except Exception as e:
+            logger.warning("Telegram apply notification failed: %s", e)
+    return {"ok": True, "status": body.status}
+
+
+app.include_router(apply_api)
 
 
 @app.get("/api/tasks/status")

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import LOGS_DIR, load_settings, AppSettings
 from app.database import Database
@@ -159,6 +160,13 @@ class AgentRunner:
                 )
             )
 
+    async def reset_stale_claims(self) -> None:
+        """Return apply requests the Windows client abandoned (crash, walk-away) to pending."""
+        async with Database(self.settings.db_path) as db:
+            count = await db.reset_stale_claims()
+        if count:
+            logger.info("Reset %d stale apply claim(s) to pending", count)
+
     async def send_daily_digest(self) -> None:
         """Send the daily Telegram digest."""
         if self._notifier is None:
@@ -182,6 +190,7 @@ class AgentRunner:
           - Nightly scrape + evaluation at 2am daily (off-peak for LLM batch)
           - Standalone evaluation at 3:30am (catch any stragglers)
           - Stale listing purge at 4am (after eval catch-up)
+          - Stale apply-claim reset every 15 minutes
         """
         # Main scrape — every 6 hours on weekdays
         self.scheduler.add_job(
@@ -216,6 +225,15 @@ class AgentRunner:
             CronTrigger(hour=4, minute=0),
             id="purge_stale",
             name="Stale listing purge (4am)",
+            replace_existing=True,
+        )
+
+        # Apply queue housekeeping — every 15 minutes
+        self.scheduler.add_job(
+            self.reset_stale_claims,
+            IntervalTrigger(minutes=15),
+            id="reset_stale_claims",
+            name="Reset stale apply claims (15m)",
             replace_existing=True,
         )
 

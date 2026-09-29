@@ -64,7 +64,7 @@
 {% endif %}
 
 <div class="detail-grid">
-    <!-- Left column: Description → Resume → Cover Letter -->
+    <!-- Left column: Description → Resume → Cover Letter → Apply -->
     <div>
         <div class="card">
             <h2>Description</h2>
@@ -195,6 +195,36 @@
                 </div>
             </div>
             {% endif %}
+        </div>
+
+        <!-- Apply section — pre-flight, then hand off to the Windows apply client -->
+        <div id="apply-area">
+            {% if apply_request %}
+            {% include "partials/apply_status.html" %}
+            {% endif %}
+            {% if not apply_request or apply_request.status in ("abandoned", "failed") %}
+            <div class="card">
+                <h2>Apply</h2>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                    Checks that the resume and cover letter are ready, then queues the job for the apply client on your PC.
+                    It fills the application and stops — you review and click Submit yourself.
+                </p>
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                    {% for lane_name in doc_lanes %}
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/jobs/{{ job.id }}/queue-apply"
+                            hx-vals='{"lane": "{{ lane_name }}"}'
+                            hx-target="#apply-panel-{{ lane_name }}"
+                            hx-swap="innerHTML">
+                        Check &amp; queue for apply{% if doc_lanes|length > 1 %} ({{ lane_name|humanize_lane }}){% endif %}
+                    </button>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% for lane_name in doc_lanes %}
+            <div id="apply-panel-{{ lane_name }}"></div>
+            {% endfor %}
         </div>
     </div>
 

@@ -89,6 +89,24 @@ class ContactConfig(BaseModel):
     portfolio_url: str = ""
 
 
+class ApplicationAnswersConfig(BaseModel):
+    """Stock answers to questions that show up on nearly every application.
+
+    An empty string means "don't answer" — the apply client leaves it for you.
+    """
+
+    work_authorization: str = "Yes, I am authorized to work in the United States"
+    sponsorship_needed: str = "No"
+    start_availability: str = "Two weeks notice"
+    willing_to_relocate: str = "No"
+    remote_preference: str = "Remote or hybrid preferred"
+    salary_expectation: str = ""  # blank = skip; filled = medium confidence (always flagged)
+    referral_source: str = "Job board"
+    previously_applied: str = "No"
+    currently_employed: str = "Yes"
+    ok_to_contact_employer: str = "No"
+
+
 class MaintenanceConfig(BaseModel):
     """Housekeeping settings — stale listing purge, etc."""
 
@@ -104,6 +122,8 @@ class ProfileConfig(BaseModel):
     blacklist: BlacklistConfig = Field(default_factory=BlacklistConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     contact: ContactConfig = Field(default_factory=ContactConfig)
+    application_answers: ApplicationAnswersConfig = Field(
+        default_factory=ApplicationAnswersConfig)
 
     @property
     def enabled_lanes(self) -> list[SearchLaneConfig]:
@@ -163,6 +183,8 @@ class SecretsConfig(BaseSettings):
     anthropic_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b-instruct-q4_K_M"
+    # Shared secret the Windows apply client sends as X-Apply-Token
+    apply_client_token: str = ""
 
 
 # ---------------------------------------------------------------------------

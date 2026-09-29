@@ -1,0 +1,51 @@
+{% set status_badge = {
+    "pending": "badge-yellow", "claimed": "badge-blue", "in_progress": "badge-blue",
+    "completed": "badge-green", "abandoned": "badge-neutral", "failed": "badge-red",
+} %}
+<div id="apply-queue-table"
+     {% if any_active %}hx-get="/apply-queue" hx-trigger="every 15s" hx-target="#apply-queue-table" hx-swap="outerHTML"{% endif %}>
+    {% if flash %}<p class="badge badge-green" style="margin-bottom: 0.75rem;">{{ flash }}</p>{% endif %}
+    {% if rows %}
+    <div class="card">
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Queued</th>
+                        <th>Job</th>
+                        <th>Lane</th>
+                        <th>Status</th>
+                        <th>ATS</th>
+                        <th>Filled / Flagged</th>
+                        <th>Notes</th>
+                        <th>Elapsed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                    <tr>
+                        <td style="white-space: nowrap;">{{ row.queued_at }}</td>
+                        <td>
+                            <a href="/jobs/{{ row.job_id }}" class="job-title-link">{{ row.job_title }}</a>
+                            <div class="company-text">{{ row.job_company or 'N/A' }}</div>
+                        </td>
+                        <td>{% if row.search_lane %}<span class="lane-badge lane-{{ row.search_lane }}">{{ row.search_lane|humanize_lane }}</span>{% endif %}</td>
+                        <td><span class="badge {{ status_badge.get(row.status, 'badge-neutral') }}">{{ row.status|replace("_", " ") }}</span></td>
+                        <td>{{ row.ats_detected or '—' }}</td>
+                        <td>{% if row.fields_filled is not none %}{{ row.fields_filled }} / {{ row.fields_flagged or 0 }}{% else %}—{% endif %}</td>
+                        <td class="reason-text" title="{{ row.notes or '' }}">{{ row.notes or '' }}</td>
+                        <td>{{ row.elapsed }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% if any_active %}<p style="color: var(--text-muted); font-size: 0.8rem;">Refreshing every 15s while the client is working.</p>{% endif %}
+    {% else %}
+    <div class="empty-state">
+        <h3>Nothing queued</h3>
+        <p>Open a job, generate its resume and cover letter, then click "Check &amp; queue for apply".</p>
+    </div>
+    {% endif %}
+</div>

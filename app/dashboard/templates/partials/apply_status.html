@@ -1,0 +1,28 @@
+{% set status_badge = {
+    "pending": "badge-yellow", "claimed": "badge-blue", "in_progress": "badge-blue",
+    "completed": "badge-green", "abandoned": "badge-neutral", "failed": "badge-red",
+} %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <h2 style="margin-bottom: 0;">Apply</h2>
+        <span>
+            <span class="badge {{ status_badge.get(apply_request.status, 'badge-neutral') }}">{{ apply_request.status|replace("_", " ") }}</span>
+            {% if apply_request.search_lane %}<span class="lane-badge lane-{{ apply_request.search_lane }}">{{ apply_request.search_lane|humanize_lane }}</span>{% endif %}
+        </span>
+    </div>
+    <p style="color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.75rem;">
+        {% if just_queued %}Queued for the apply client.{% endif %}
+        {% if apply_request.status == "pending" %}
+        Waiting for the Windows apply client to pick it up. It fills the form and stops — you review and submit.
+        {% elif apply_request.status in ("claimed", "in_progress") %}
+        The apply client is working on it{% if apply_request.ats_detected %} ({{ apply_request.ats_detected }}){% endif %} — check the browser on your PC.
+        {% elif apply_request.status == "completed" %}
+        Application submitted{% if apply_request.completed_at %} on {{ apply_request.completed_at }}{% endif %}.
+        {% else %}
+        Apply {{ apply_request.status }}{% if apply_request.notes %}: {{ apply_request.notes }}{% endif %}
+        {% endif %}
+    </p>
+    <div style="margin-top: 0.5rem;">
+        <a href="/apply-queue" class="btn btn-ghost btn-sm">View apply queue &rarr;</a>
+    </div>
+</div>

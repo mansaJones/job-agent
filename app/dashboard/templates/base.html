@@ -14,6 +14,7 @@
             <div class="nav-links">
                 <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">Dashboard</a>
                 <a href="/jobs" class="{% if request.url.path.startswith('/jobs') %}active{% endif %}">Jobs</a>
+                <a href="/apply-queue" class="{% if request.url.path.startswith('/apply-queue') %}active{% endif %}">Apply Queue</a>
             </div>
         </div>
     </nav>

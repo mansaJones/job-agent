@@ -87,6 +87,22 @@ contact:
   linkedin_url: ""
   portfolio_url: "https://mansa-tech.com/portfolio/"
 
+# Stock answers the apply client uses for common application questions.
+# Leave a value blank ("") to have the client skip it and flag it for you.
+# There is intentionally no config for EEO/demographic questions — the client
+# always picks "decline to self-identify" or leaves them for you.
+application_answers:
+  work_authorization: "Yes, I am authorized to work in the United States"
+  sponsorship_needed: "No"
+  start_availability: "Two weeks notice"
+  willing_to_relocate: "No"
+  remote_preference: "Remote or hybrid preferred"
+  salary_expectation: ""            # leave blank to skip; filled = medium confidence
+  referral_source: "Job board"
+  previously_applied: "No"
+  currently_employed: "Yes"
+  ok_to_contact_employer: "No"
+
 maintenance:
   stale_listing_max_age_days: 30
   preserve_statuses:

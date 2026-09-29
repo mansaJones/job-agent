@@ -792,6 +792,88 @@ def resume(
 
 
 # ------------------------------------------------------------------
+# apply queue commands
+# ------------------------------------------------------------------
+
+@app.command("apply-queue")
+def apply_queue(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show."),
+) -> None:
+    """Show the apply queue (newest first)."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        async with Database(settings.db_path) as db:
+            rows = await db.get_apply_queue(limit=limit)
+
+        if not rows:
+            console.print("[dim]Apply queue is empty.[/dim]")
+            return
+
+        colors = {"pending": "yellow", "claimed": "cyan", "in_progress": "cyan",
+                  "completed": "green", "abandoned": "dim", "failed": "red"}
+        table = Table(title="Apply Queue")
+        for col in ("#", "Queued", "Job", "Lane", "Status", "ATS", "Filled/Flagged", "Notes"):
+            table.add_column(col)
+        for r in rows:
+            color = colors.get(r["status"], "white")
+            filled = (f"{r['fields_filled']}/{r['fields_flagged'] or 0}"
+                      if r["fields_filled"] is not None else "—")
+            table.add_row(
+                str(r["id"]), r["queued_at"] or "",
+                f"#{r['job_id']} {r['job_title']} @ {r['job_company'] or 'N/A'}",
+                r["search_lane"] or "", f"[{color}]{r['status']}[/{color}]",
+                r["ats_detected"] or "—", filled, (r["notes"] or "")[:60],
+            )
+        console.print(table)
+
+    asyncio.run(_run())
+
+
+@app.command("queue-apply")
+def queue_apply(
+    job_id: int = typer.Argument(..., help="Job ID to queue for the apply client."),
+    lane: str = typer.Option(..., "--lane", "-l", help="Search lane, e.g. frontend_developer."),
+    force: bool = typer.Option(
+        False, "--force", help="Queue despite warnings (blocking checks still apply).",
+    ),
+) -> None:
+    """Run pre-flight checks and queue a job for the Windows apply client."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        from app.applicator.preflight import preflight_and_enqueue
+        from app.database import ApplyQueueError
+
+        async with Database(settings.db_path) as db:
+            try:
+                checks, queue_id = await preflight_and_enqueue(
+                    db, settings, job_id, lane, force=force)
+            except (LookupError, ValueError, ApplyQueueError) as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(1)
+
+        console.print(f"\n[bold]Pre-flight — job #{job_id} [{lane}][/bold]")
+        for c in checks:
+            icon = ("[green]✓[/green]" if c.ok else
+                    "[yellow]![/yellow]" if c.warning else "[red]✗[/red]")
+            console.print(f"  {icon} {c.name}: [dim]{c.detail}[/dim]")
+
+        if queue_id is not None:
+            console.print(f"\n[green]Queued as apply request #{queue_id}.[/green] "
+                          "The Windows apply client will pick it up.")
+        elif any(c.blocking for c in checks):
+            console.print("\n[red]Not queued — fix the ✗ items first.[/red]")
+            raise typer.Exit(1)
+        else:
+            console.print("\n[yellow]Not queued — only warnings remain. "
+                          "Re-run with --force to queue anyway.[/yellow]")
+            raise typer.Exit(1)
+
+    asyncio.run(_run())
+
+
+# ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
 

@@ -198,6 +198,8 @@ boards:
 | `job-agent parse-linkedin` | Parse `resumes/linkedin_export.zip` into `resumes/linkedin_data.json` |
 | `job-agent resume 5 --lane marketing_manager` | Generate a tailored resume (PDF + DOCX) for job #5 |
 | `job-agent resume 5 --lane marketing_manager --force` | Regenerate, ignoring the cache |
+| `job-agent queue-apply 5 --lane frontend_developer` | Pre-flight + queue job #5 for the apply client (`--force` skips warnings) |
+| `job-agent apply-queue` | Show the apply queue |
 | `job-agent status` | Database stats by status |
 
 ## Evaluation Scoring
@@ -326,6 +328,96 @@ job-agent migrate-cover-letters
 ```
 
 It's safe to re-run: a job + lane that already has a cover letter is skipped. Migrated drafts are kept like manual edits until you regenerate them.
+
+## Assisted Apply (Apply Queue)
+
+The Jetson keeps a queue of jobs you've approved for applying. A separate **Windows apply client** (phase 4b, `apply_client/`) polls the queue, opens each application in Chrome, and fills what it confidently can. It then **stops before submitting**: you review the form, click the site's own Submit button, and press **Done** in the client's overlay.
+
+> This half (4a) is the Jetson side only. The queue does nothing until the Windows client from phase 4b is installed and running.
+
+### The client never:
+- clicks Submit, Send Application, or any other final-step control;
+- fills SSN, date of birth, government IDs, payment details, e-signatures, or consent/attestation fields;
+- answers EEO or demographic questions. It picks "decline to self-identify" if that option exists, otherwise it leaves them for you;
+- types passwords or solves CAPTCHAs. It hands off to you instead.
+
+### Setup
+
+1. Generate a shared secret:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+2. Put it in `config/secrets.env` as `APPLY_CLIENT_TOKEN=...` (see `config/secrets.env.example`). Use the same value in the Windows client's `apply_client/.env`. Until it's set, the `/api/apply-queue/*` routes return 503.
+3. Set `contact.email`, `contact.phone`, and `contact.linkedin_url` in `config/profile.yaml`. Pre-flight blocks queueing until all three are filled in.
+4. Review the stock answers the client uses for common questions:
+
+```yaml
+application_answers:
+  work_authorization: "Yes, I am authorized to work in the United States"
+  sponsorship_needed: "No"
+  start_availability: "Two weeks notice"
+  willing_to_relocate: "No"
+  remote_preference: "Remote or hybrid preferred"
+  salary_expectation: ""            # leave blank to skip; filled = medium confidence
+  referral_source: "Job board"
+  previously_applied: "No"
+  currently_employed: "Yes"
+  ok_to_contact_employer: "No"
+```
+
+A blank answer means the client leaves that question for you. There is deliberately no config for EEO/demographic answers.
+
+### Queueing a job
+
+Recommended order for each job: **resume → cover letter (review + Save edits) → Check & queue for apply**.
+
+On a job page, **Check & queue for apply** runs a pre-flight checklist:
+
+| Check | If it fails |
+|-------|-------------|
+| `APPLY_CLIENT_TOKEN` configured | ❌ blocks |
+| Tailored resume exists for this lane | ❌ blocks |
+| Cover letter exists for this lane | ❌ blocks |
+| Applicant data complete (email, phone, LinkedIn URL) | ❌ blocks |
+| Job not already applied or queued | ❌ blocks |
+| Resume has no fabrication warnings | ⚠️ warning |
+| Cover letter reviewed (saved with edits) | ⚠️ warning |
+
+If only warnings remain, you can click **Queue anyway**. The CLI equivalent:
+
+```bash
+job-agent queue-apply 42 --lane marketing_manager           # stops on warnings
+job-agent queue-apply 42 --lane marketing_manager --force   # queues despite warnings
+job-agent apply-queue                                       # show the queue
+```
+
+The **Apply Queue** page (nav bar) lists every request and refreshes every 15 seconds while the client is working.
+
+### Lifecycle
+
+```
+            dashboard / CLI                 Windows apply client                     human
+ queue-apply ─────▶ pending ── claim ──▶ claimed ── progress ──▶ in_progress ── Done ──▶ completed
+                       ▲                     │                        │         Abandon ──▶ abandoned
+                       │                     └──────── error ─────────┴───────────────────▶ failed
+                       └─── stale claim reset (claimed/in_progress > 30 min) ───┘
+```
+
+- **completed:** also records the application in `applied` (method `assisted`), marks the job `applied`, and sends a Telegram message. Abandoned and failed requests send a Telegram warning.
+- **Stale claims:** if the client crashes or you walk away, the scheduler resets the request to `pending` after 30 minutes. It checks every 15 minutes, and there's also a **Reset stale** button on the Apply Queue page.
+
+### Client API (`X-Apply-Token` header required)
+
+| Route | Purpose |
+|-------|---------|
+| `GET /api/apply-queue/health` | `{ok, pending}` — cheap poll target |
+| `GET /api/apply-queue/pending` | Pending requests with job info, applicant data, document URLs |
+| `POST /api/apply-queue/{id}/claim` | Claim a request (409 if someone else got it) |
+| `GET /api/apply-queue/{id}/documents/{resume\|cover_letter}?fmt=pdf\|docx` | Download a document |
+| `POST /api/apply-queue/{id}/progress` | `{status: in_progress, ats_detected, apply_url, fields_filled, fields_flagged, notes}` |
+| `POST /api/apply-queue/{id}/result` | `{status: completed\|abandoned\|failed, notes}` |
 
 ## Adaptive Scraper Health
 
@@ -456,6 +548,7 @@ The built-in scheduler runs scraping and evaluation on autopilot:
 - Weekday scrapes every 6 hours
 - Nightly scrape + evaluate at 2:00 AM
 - Eval catch-up at 3:30 AM
+- Stale apply-claim reset every 15 minutes (see [Assisted Apply](#assisted-apply-apply-queue))
 - Stale listing purge at 4:00 AM: deletes jobs scraped more than `maintenance.stale_listing_max_age_days` ago, unless their status is in `preserve_statuses` (default: approved, applied). Their evaluations, decisions, and applied records are deleted too. If a single run purges more than 100 jobs, you get a Telegram alert, since that usually means a config mistake.
 
 Start with: `job-agent run-scheduler` (or set up as a systemd service)
@@ -495,6 +588,11 @@ python tests/test_core.py
   - [ ] systemd service files
   - [ ] Daily DB backup cron
 - [ ] **Phase 6** — Analytics, outcome tracking, continuous improvement
+- [x] **v2 phase 1** — Dual search lanes + stale listing auto-purge
+- [x] **v2 phase 2** — LinkedIn parser + tailored resume generator
+- [x] **v2 phase 3** — Lane-aware, editable cover letters
+- [x] **v2 phase 4a** — Apply queue API, pre-flight checks, dashboard
+- [ ] **v2 phase 4b** — Windows Playwright apply client
 
 ## Dependencies
 

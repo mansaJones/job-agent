@@ -260,6 +260,18 @@ tbody td {
 .saved-flash { animation: saved-fade 2.5s ease-out forwards; }
 @keyframes saved-fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
 
+/* Apply pre-flight checklist */
+.preflight-list { list-style: none; margin-top: 0.75rem; display: grid; gap: 0.5rem; }
+.preflight-item {
+    display: flex; gap: 0.6rem; align-items: flex-start;
+    padding: 0.5rem 0.65rem; border-radius: 6px; border: 1px solid var(--border);
+    font-size: 0.875rem;
+}
+.preflight-item.preflight-block { border-color: var(--red); background: var(--red-bg); }
+.preflight-item.preflight-warn { border-color: var(--yellow); background: var(--yellow-bg); }
+.preflight-detail { display: block; color: var(--text-secondary); font-size: 0.82rem; }
+.preflight-icon { flex-shrink: 0; }
+
 /* Side-by-side lane evaluations on job detail */
 .lane-eval-grid {
     display: grid;

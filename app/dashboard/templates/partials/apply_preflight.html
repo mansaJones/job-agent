@@ -1,0 +1,39 @@
+<div class="card apply-preflight">
+    <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <h2 style="margin-bottom: 0;">Pre-flight check</h2>
+        <span class="lane-badge lane-{{ lane }}">{{ lane|humanize_lane }}</span>
+    </div>
+    <ul class="preflight-list">
+        {% for c in checks %}
+        <li class="preflight-item {% if c.blocking %}preflight-block{% elif c.warning %}preflight-warn{% else %}preflight-ok{% endif %}">
+            <span class="preflight-icon">{% if c.ok %}✅{% elif c.warning %}⚠️{% else %}❌{% endif %}</span>
+            <span>
+                <strong>{{ c.name }}</strong>
+                <span class="preflight-detail">{{ c.detail }}</span>
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+
+    <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+        {% if blocked %}
+        <span style="color: var(--red); font-size: 0.85rem;">Fix the ❌ items above, then check again.</span>
+        <button class="btn btn-ghost btn-sm"
+                hx-post="/api/jobs/{{ job_id }}/queue-apply"
+                hx-vals='{"lane": "{{ lane }}"}'
+                hx-target="#apply-panel-{{ lane }}"
+                hx-swap="innerHTML">
+            Check again
+        </button>
+        {% else %}
+        <span style="color: var(--yellow); font-size: 0.85rem;">Only warnings left — review them, or queue anyway.</span>
+        <button class="btn btn-primary btn-sm"
+                hx-post="/api/jobs/{{ job_id }}/queue-apply"
+                hx-vals='{"lane": "{{ lane }}", "force": true}'
+                hx-target="#apply-panel-{{ lane }}"
+                hx-swap="innerHTML">
+            Queue anyway
+        </button>
+        {% endif %}
+    </div>
+</div>
