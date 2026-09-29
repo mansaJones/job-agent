@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import anthropic
 
+from app.config import ContactConfig
 from app.evaluator.pipeline import _smart_truncate
 from app.utils.json_extract import extract_json_object
 
@@ -111,9 +112,12 @@ class ClaudeClient:
         job_title: str,
         company: str,
         job_description: str,
-        resume_text: str,
+        candidate_context: str,
+        contact: ContactConfig,
+        full_name: str,
         template: str | None = None,
         eval_highlights: list[str] | None = None,
+        lane_target_field: str = "",
     ) -> PolishResult:
         """Generate a tailored cover letter for a specific job.
 
@@ -121,9 +125,13 @@ class ClaudeClient:
             job_title: The job title.
             company: The company name.
             job_description: Full job posting description.
-            resume_text: The candidate's resume as plain text.
-            template: Optional cover letter template to adapt.
+            candidate_context: The candidate's experience as plain text — ideally
+                the tailored resume for this job, else LinkedIn data or a resume PDF.
+            contact: Contact details for the signature block.
+            full_name: The candidate's name, used to sign off.
+            template: Optional structure/tone guidance to adapt.
             eval_highlights: Optional highlights from the local LLM evaluation.
+            lane_target_field: The search lane's target field, for framing.
 
         Returns:
             PolishResult with the generated cover letter and usage stats.
@@ -133,15 +141,27 @@ class ClaudeClient:
             "You write compelling, authentic cover letters that highlight "
             "relevant experience without sounding generic or AI-generated. "
             "Keep the tone professional but personable. "
-            "The letter should be concise (3-4 paragraphs, under 400 words)."
+            "The letter should be concise (3-4 paragraphs, under 400 words).\n\n"
+            "NEVER invent employers, titles, dates, team sizes, metrics, or tools. Every "
+            "claim must be traceable to the candidate context. If the job asks for "
+            "something the candidate has no evidence of, do not claim it — pivot to "
+            "adjacent genuine experience or omit it.\n\n"
+            "Sign off with the candidate's actual name. No placeholders."
         )
 
+        signature = [full_name or "(use the candidate's name from the candidate context)"]
+        signature += [v for v in (contact.email, contact.phone) if v]
+
         prompt_parts = [
-            f"Write a tailored cover letter for the following job:\n",
+            "Write a tailored cover letter for the following job:\n",
             f"**Position:** {job_title}",
             f"**Company:** {company}",
-            f"\n**Job Description:**\n{job_description[:4000]}",
-            f"\n**Candidate Resume:**\n{resume_text[:5000]}",
+        ]
+        if lane_target_field:
+            prompt_parts.append(f"**Target field:** {lane_target_field}")
+        prompt_parts += [
+            f"\n**Job Description:**\n{_smart_truncate(job_description, max_chars=4000)}",
+            f"\n**Candidate Context (the ONLY source of truth):**\n{candidate_context[:8000]}",
         ]
 
         if eval_highlights:
@@ -154,11 +174,14 @@ class ClaudeClient:
                 f"\n**Use this template as a starting structure (adapt it, don't copy verbatim):**\n{template}"
             )
 
-        prompt_parts.append(
-            "\nWrite the cover letter now. Do not include placeholder brackets "
-            "like [Your Name] — use the candidate's actual information from the resume. "
-            "Focus on specific, relevant experience that maps to this job's requirements."
-        )
+        prompt_parts += [
+            f"\n**Signature block:**\n" + "\n".join(signature),
+            "\nWrite the cover letter now. Start with the salutation and end with the "
+            "sign-off and signature block — the letterhead (name, contact line, date) is "
+            "added separately, so don't repeat it at the top. Separate paragraphs with a "
+            "blank line. Do not include placeholder brackets like [Your Name]. "
+            "Focus on specific, relevant experience that maps to this job's requirements.",
+        ]
 
         prompt = "\n".join(prompt_parts)
 
@@ -171,7 +194,7 @@ class ClaudeClient:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        cover_letter = response.content[0].text
+        cover_letter = response.content[0].text.strip()
         input_tokens = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
 

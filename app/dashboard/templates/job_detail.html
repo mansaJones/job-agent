@@ -64,7 +64,7 @@
 {% endif %}
 
 <div class="detail-grid">
-    <!-- Left column: Description + Cover Letter -->
+    <!-- Left column: Description → Resume → Cover Letter -->
     <div>
         <div class="card">
             <h2>Description</h2>
@@ -79,7 +79,7 @@
 
         <!-- Resume section (opt-in per job, one panel per lane) -->
         <div id="resume-area">
-            {% for lane_name in resume_lanes %}
+            {% for lane_name in doc_lanes %}
             <div id="resume-panel-{{ lane_name }}">
                 {% if existing_resumes.get(lane_name) %}
                 {% set ctx = existing_resumes[lane_name] %}
@@ -91,7 +91,7 @@
             </div>
             {% endfor %}
 
-            {% set missing_lanes = resume_lanes|reject("in", existing_resumes)|list %}
+            {% set missing_lanes = doc_lanes|reject("in", existing_resumes)|list %}
             {% if missing_lanes %}
             <div class="card" id="resume-opt-in">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
@@ -130,30 +130,38 @@
             {% endif %}
         </div>
 
-        <!-- Cover Letter section (opt-in per job) -->
+        <!-- Cover Letter section (opt-in per job, one panel per lane) -->
         <div id="cover-letter-area">
-            {% if job.cover_letter %}
-            <!-- Already generated — always show -->
-            <div class="card" style="border-color: var(--accent);">
-                <h2 style="color: var(--accent);">Cover Letter</h2>
-                <div class="detail-description" id="cover-letter-text" style="white-space: pre-wrap;">{{ job.cover_letter }}</div>
-                <div style="margin-top: 1rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
-                    <button class="btn btn-primary btn-sm"
-                            hx-post="/api/jobs/{{ job.id }}/polish"
-                            hx-target="#cover-letter-area"
-                            hx-swap="innerHTML">
-                        Regenerate
-                    </button>
-                    <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('cover-letter-text').innerText).then(() => this.innerText = 'Copied!')">
-                        Copy to clipboard
-                    </button>
-                </div>
+            {% for lane_name in doc_lanes %}
+            <div id="cover-letter-panel-{{ lane_name }}">
+                {% if existing_cover_letters.get(lane_name) %}
+                {% set cl = existing_cover_letters[lane_name] %}
+                {% with job_id=cl.job_id, lane=cl.lane, text=cl.text, from_cache=cl.from_cache,
+                        edited=cl.edited, model=cl.model, cost=cl.cost,
+                        context_source=cl.context_source, saved=cl.saved %}
+                {% include "partials/cover_letter.html" %}
+                {% endwith %}
+                {% endif %}
             </div>
-            {% else %}
-            <!-- No cover letter yet — show opt-in toggle instead of always-visible generator -->
+            {% endfor %}
+
+            {% if show_legacy_cover_letter %}
+            <div class="card">
+                <h2>Cover Letter <span class="badge badge-neutral">legacy</span></h2>
+                <div class="detail-description" style="white-space: pre-wrap;">{{ job.cover_letter }}</div>
+                <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.75rem;">
+                    Legacy draft — run <code>job-agent migrate-cover-letters</code> to make it editable.
+                </p>
+            </div>
+            {% endif %}
+
+            {% set missing_cl_lanes = doc_lanes|reject("in", existing_cover_letters)|list %}
+            {% if missing_cl_lanes %}
             <div class="card" id="cover-letter-opt-in">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="color: var(--text-muted); font-size: 0.9rem;">Cover letter not generated</span>
+                    <span style="color: var(--text-muted); font-size: 0.9rem;">
+                        {% if existing_cover_letters %}Cover letter for other lane not generated{% else %}Cover letter not generated{% endif %}
+                    </span>
                     <button class="btn btn-ghost btn-sm"
                             onclick="document.getElementById('cover-letter-opt-in').style.display='none'; document.getElementById('cover-letter-generator').style.display='block';">
                         I want a cover letter for this one
@@ -163,16 +171,22 @@
             <div class="card" id="cover-letter-generator" style="display: none;">
                 <h2>Cover Letter</h2>
                 <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
-                    Generate a tailored cover letter using Claude API.
+                    Generate a lane-aware cover letter using Claude API.
+                    {% if missing_cl_lanes|reject("in", existing_resumes)|list %}
+                    <br><span style="color: var(--yellow);">Tip: generate the resume first — the letter is written from it when it exists.</span>
+                    {% endif %}
                 </p>
-                <div style="display: flex; align-items: center; gap: 1rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                    {% for lane_name in missing_cl_lanes %}
                     <button class="btn btn-primary btn-sm"
-                            hx-post="/api/jobs/{{ job.id }}/polish"
-                            hx-target="#cover-letter-area"
+                            hx-post="/api/jobs/{{ job.id }}/generate-cover-letter"
+                            hx-vals='{"lane": "{{ lane_name }}"}'
+                            hx-target="#cover-letter-panel-{{ lane_name }}"
                             hx-swap="innerHTML"
                             hx-indicator="#polish-spinner">
-                        Generate Cover Letter
+                        {{ lane_name|humanize_lane }} cover letter
                     </button>
+                    {% endfor %}
                     <button class="btn btn-ghost btn-sm"
                             onclick="document.getElementById('cover-letter-generator').style.display='none'; document.getElementById('cover-letter-opt-in').style.display='block';">
                         Never mind

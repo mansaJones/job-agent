@@ -1,0 +1,10 @@
+TEMPLATE: General Role
+
+STRUCTURE:
+- Opening: Name the role and connect it to something specific about the company — its product, customers, or mission.
+- Paragraph 2: The most relevant experience for this job's core requirements. Lead with concrete outcomes and quantify where possible.
+- Paragraph 3: Supporting strengths — adjacent skills, tools, or domain knowledge that round out the fit.
+- Paragraph 4: How the candidate works with others — collaboration, communication, ownership.
+- Closing: Brief and forward-looking. Invite a conversation.
+
+TONE: Professional, specific, and direct. Let the experience carry the letter rather than adjectives.

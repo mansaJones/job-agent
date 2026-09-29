@@ -131,7 +131,7 @@ def _enabled_lane_names() -> list[str]:
     return [lane.name for lane in get_settings().profile.enabled_lanes]
 
 
-def _resume_lanes(job: dict) -> list[str]:
+def _doc_lanes(job: dict) -> list[str]:
     """Lanes a resume can be generated for: every enabled lane for 'both', else the job's lane."""
     lanes = _enabled_lane_names()
     if job.get("search_lane") == "both":
@@ -139,6 +139,48 @@ def _resume_lanes(job: dict) -> list[str]:
     if job.get("search_lane") in lanes:
         return [job["search_lane"]]
     return lanes[:1]
+
+
+def _cover_letter_panel_ctx(job_id: int, lane: str, result: Any, *,
+                            saved: bool = False) -> dict[str, Any]:
+    """Template context for partials/cover_letter.html from a CoverLetterResult."""
+    gen = result.gen_result
+    return {
+        "job_id": job_id, "lane": lane, "text": result.text,
+        "from_cache": result.from_cache, "edited": result.edited,
+        "model": result.model_used, "cost": gen.cost_display if gen else None,
+        "context_source": result.context_source, "saved": saved,
+    }
+
+
+async def _download_filename(db: Database, job_id: int, kind: str, fmt: str) -> str:
+    """"{last_name}_{company_slug}_{kind}.{fmt}" for download responses."""
+    from app.resume_generator.linkedin_parser import load_linkedin_data
+
+    job = await db.get_job(job_id)
+    company_slug = re.sub(r"[^A-Za-z0-9]+", "_", (job.company if job else "") or "").strip("_")
+    try:
+        last_name = load_linkedin_data().last_name or kind
+    except FileNotFoundError:
+        last_name = kind
+    return f"{last_name}_{company_slug or 'job'}_{kind}.{fmt}"
+
+
+def _parse_force(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ("true", "1", "yes", "on") if value is not None else False
+
+
+async def _lane_and_force(request: Request, lane: str | None, force: Any) -> tuple[str | None, bool]:
+    """Read lane/force from form fields, falling back to a JSON body (same as api_decide)."""
+    if lane is not None:
+        return lane, _parse_force(force)
+    try:
+        body = await request.json()
+    except Exception:
+        return None, False
+    return body.get("lane"), _parse_force(body.get("force", False))
 
 
 def _resume_panel_ctx(job_id: int, lane: str, resume: Any, *, from_cache: bool,
@@ -243,29 +285,48 @@ async def job_detail_page(request: Request, job_id: int):
             evaluation = await db.get_evaluation(job_id, lane=lane_name)
             lane_evals.append({"lane": lane_name, "eval": evaluation})
 
-    # Previously generated resumes render populated instead of the opt-in stub
-    from app.resume_generator.pipeline import DOC_TYPE, load_saved_resume
+    # Previously generated documents render populated instead of the opt-in stubs
+    from app.polisher.pipeline import DOC_TYPE as COVER_LETTER, read_context_source
+    from app.resume_generator.pipeline import DOC_TYPE as RESUME, load_saved_resume
 
-    resume_lanes = _resume_lanes(job)
+    doc_lanes = _doc_lanes(job)
     existing_resumes: dict[str, dict[str, Any]] = {}
-    for lane_name in resume_lanes:
-        doc = await db.get_generated_document(job_id, lane_name, DOC_TYPE)
-        if not doc:
+    existing_cover_letters: dict[str, dict[str, Any]] = {}
+    has_cover_letter_rows = False
+    for doc in await db.get_generated_documents_for_job(job_id):  # newest first
+        lane_name = doc["search_lane"]
+        if doc["doc_type"] == COVER_LETTER:
+            has_cover_letter_rows = True
+        if lane_name not in doc_lanes:
             continue
-        saved = load_saved_resume(Path(doc["file_path"]))
-        if saved is None:
-            continue
-        existing_resumes[lane_name] = _resume_panel_ctx(
-            job_id, lane_name, saved, from_cache=True, cost=None,
-            model=doc["model_used"], generated_at=doc["generated_at"],
-        )
+        pdf_path = Path(doc["file_path"])
+        if doc["doc_type"] == RESUME and lane_name not in existing_resumes:
+            saved = load_saved_resume(pdf_path)
+            if saved is not None:
+                existing_resumes[lane_name] = _resume_panel_ctx(
+                    job_id, lane_name, saved, from_cache=True, cost=None,
+                    model=doc["model_used"], generated_at=doc["generated_at"],
+                )
+        elif doc["doc_type"] == COVER_LETTER and lane_name not in existing_cover_letters:
+            txt_path = pdf_path.with_suffix(".txt")
+            if txt_path.exists():
+                existing_cover_letters[lane_name] = {
+                    "job_id": job_id, "lane": lane_name,
+                    "text": txt_path.read_text(encoding="utf-8"),
+                    "from_cache": True, "edited": doc["model_used"] == "manual-edit",
+                    "model": doc["model_used"], "cost": None,
+                    "context_source": read_context_source(txt_path), "saved": False,
+                }
 
     return templates.TemplateResponse(request, "job_detail.html", {
         "request": request,
         "job": job,
         "lane_evals": lane_evals,
-        "resume_lanes": resume_lanes,
+        "doc_lanes": doc_lanes,
         "existing_resumes": existing_resumes,
+        "existing_cover_letters": existing_cover_letters,
+        # Legacy evaluations.cover_letter_draft only shows until letters are migrated
+        "show_legacy_cover_letter": bool(job.get("cover_letter")) and not has_cover_letter_rows,
     })
 
 
@@ -399,59 +460,8 @@ async def api_evaluate(request: Request, background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
-@app.post("/api/jobs/{job_id}/polish")
-async def api_polish(request: Request, job_id: int):
-    """Generate a cover letter for a job using Claude API."""
-    settings = get_settings()
-    db = get_db()
-
-    if not settings.secrets.anthropic_api_key:
-        if request.headers.get("HX-Request"):
-            return HTMLResponse('<span class="badge badge-red">API key not configured</span>')
-        raise HTTPException(status_code=400, detail="Anthropic API key not configured")
-
-    job = await db.get_job_with_evaluation(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    # Run synchronously (cover letters are fast, ~2-5s)
-    from app.polisher.claude_client import ClaudeClient
-    from app.polisher.pipeline import PolishPipeline
-
-    try:
-        async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
-            pipeline = PolishPipeline(db, claude, settings)
-            result = await pipeline.polish_job(job_id)
-    except Exception as e:
-        logger.error("Polish failed for job #%d: %s", job_id, e, exc_info=True)
-        if request.headers.get("HX-Request"):
-            return HTMLResponse(f'<span class="badge badge-red">Error: {e}</span>')
-        raise HTTPException(status_code=500, detail=str(e))
-
-    if result is None:
-        if request.headers.get("HX-Request"):
-            return HTMLResponse('<span class="badge badge-red">Generation failed</span>')
-        raise HTTPException(status_code=500, detail="Cover letter generation failed")
-
-    if request.headers.get("HX-Request"):
-        # Return the cover letter section for HTMX swap
-        return templates.TemplateResponse(request, "partials/cover_letter.html", {
-            "request": request,
-            "cover_letter": result.cover_letter,
-            "cost": result.cost_display,
-            "model": result.model_used,
-        })
-
-    return {
-        "status": "ok",
-        "cover_letter": result.cover_letter,
-        "cost": result.cost_display,
-        "model": result.model_used,
-    }
-
-
-def _resume_error(request: Request, message: str, status_code: int = 400):
-    # HTMX won't swap 4xx responses by default, so badges go back as 200 (like /polish)
+def _error_badge(request: Request, message: str, status_code: int = 400):
+    # HTMX won't swap 4xx responses by default, so badges go back as 200
     if request.headers.get("HX-Request"):
         return HTMLResponse(f'<span class="badge badge-red">{message}</span>')
     raise HTTPException(status_code=status_code, detail=message)
@@ -471,24 +481,17 @@ async def api_generate_resume(
     settings = get_settings()
     db = get_db()
 
-    force_flag = str(force).lower() in ("true", "1", "yes", "on") if force is not None else False
-    if lane is None:
-        try:
-            body = await request.json()
-            lane = body.get("lane")
-            force_flag = bool(body.get("force", False))
-        except Exception:
-            lane = None
+    lane, force_flag = await _lane_and_force(request, lane, force)
     if not lane:
-        return _resume_error(request, "No lane provided")
+        return _error_badge(request, "No lane provided")
 
     if not settings.secrets.anthropic_api_key:
-        return _resume_error(request, "API key not configured")
+        return _error_badge(request, "API key not configured")
 
     from app.resume_generator.linkedin_parser import DEFAULT_DATA_PATH
 
     if not DEFAULT_DATA_PATH.exists():
-        return _resume_error(request, "Run `job-agent parse-linkedin` first")
+        return _error_badge(request, "Run `job-agent parse-linkedin` first")
 
     from app.polisher.claude_client import ClaudeClient
     from app.resume_generator.pipeline import JobNotFoundError, ResumePipeline
@@ -500,11 +503,11 @@ async def api_generate_resume(
     except JobNotFoundError:
         raise HTTPException(status_code=404, detail="Job not found")
     except ValueError as e:
-        return _resume_error(request, str(e))
+        return _error_badge(request, str(e))
     except Exception as e:
         logger.error("Resume generation failed for job #%d [%s]: %s", job_id, lane, e,
                      exc_info=True)
-        return _resume_error(request, f"Error: {e}", status_code=500)
+        return _error_badge(request, f"Error: {e}", status_code=500)
 
     gen = result.gen_result
     if request.headers.get("HX-Request"):
@@ -534,7 +537,6 @@ async def api_download_resume(job_id: int, lane: str, fmt: str = Query("pdf")):
     if fmt not in ("pdf", "docx"):
         raise HTTPException(status_code=400, detail="fmt must be pdf or docx")
 
-    from app.resume_generator.linkedin_parser import load_linkedin_data
     from app.resume_generator.pipeline import DOC_TYPE
 
     db = get_db()
@@ -545,19 +547,117 @@ async def api_download_resume(job_id: int, lane: str, fmt: str = Query("pdf")):
     if not path.exists():
         raise HTTPException(status_code=404, detail="Resume file missing — regenerate it")
 
-    job = await db.get_job(job_id)
-    company_slug = re.sub(r"[^A-Za-z0-9]+", "_", (job.company if job else "") or "").strip("_")
-    try:
-        last_name = load_linkedin_data().last_name or "resume"
-    except FileNotFoundError:
-        last_name = "resume"
-    filename = f"{last_name}_{company_slug or 'job'}_resume.{fmt}"
+    filename = await _download_filename(db, job_id, "resume", fmt)
 
     media_type = (
         "application/pdf" if fmt == "pdf"
         else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@app.post("/api/jobs/{job_id}/generate-cover-letter")
+async def api_generate_cover_letter(
+    request: Request,
+    job_id: int,
+    lane: str | None = Form(None),
+    force: str | None = Form(None),
+):
+    """Generate (or serve cached/edited) a lane-aware cover letter.
+
+    Accepts form-encoded (HTMX hx-vals) or JSON: {"lane": "...", "force": true}.
+    """
+    settings = get_settings()
+    db = get_db()
+
+    lane, force_flag = await _lane_and_force(request, lane, force)
+    if not lane:
+        return _error_badge(request, "No lane provided")
+    if not settings.secrets.anthropic_api_key:
+        return _error_badge(request, "API key not configured")
+
+    from app.polisher.claude_client import ClaudeClient
+    from app.polisher.pipeline import PolishPipeline
+    from app.resume_generator.pipeline import JobNotFoundError
+
+    try:
+        async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
+            pipeline = PolishPipeline(db, claude, settings)
+            result = await pipeline.polish_job(job_id, lane, force=force_flag)
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except (ValueError, FileNotFoundError) as e:
+        return _error_badge(request, str(e))
+    except Exception as e:
+        logger.error("Cover letter failed for job #%d [%s]: %s", job_id, lane, e, exc_info=True)
+        return _error_badge(request, f"Error: {e}", status_code=500)
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/cover_letter.html", {
+            "request": request, **_cover_letter_panel_ctx(job_id, lane, result),
+        })
+
+    gen = result.gen_result
+    return {
+        "status": "ok",
+        "cover_letter": result.text,
+        "context_source": result.context_source,
+        "from_cache": result.from_cache,
+        "edited": result.edited,
+        "model": result.model_used,
+        "cost": gen.cost_display if gen else None,
+        "txt_path": str(result.txt_path),
+        "pdf_path": str(result.pdf_path),
+        "docx_path": str(result.docx_path),
+    }
+
+
+@app.put("/api/jobs/{job_id}/cover-letter/{lane}")
+async def api_save_cover_letter(
+    request: Request, job_id: int, lane: str, text: str = Form(...),
+):
+    """Save a hand-edited cover letter and re-render its PDF/DOCX."""
+    from app.polisher.pipeline import PolishPipeline
+    from app.resume_generator.pipeline import JobNotFoundError
+
+    pipeline = PolishPipeline(get_db(), None, get_settings())
+    try:
+        result = await pipeline.save_edited_cover_letter(job_id, lane, text)
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError as e:
+        return _error_badge(request, str(e))
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/cover_letter.html", {
+            "request": request, **_cover_letter_panel_ctx(job_id, lane, result, saved=True),
+        })
+    return {"status": "ok", "doc_id": result.doc_id, "model": result.model_used}
+
+
+@app.get("/api/jobs/{job_id}/cover-letter/{lane}/download")
+async def api_download_cover_letter(job_id: int, lane: str, fmt: str = Query("pdf")):
+    """Download a cover letter as PDF, DOCX, or TXT."""
+    if fmt not in ("pdf", "docx", "txt"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf, docx, or txt")
+
+    from app.polisher.pipeline import DOC_TYPE
+
+    db = get_db()
+    doc = await db.get_generated_document(job_id, lane, DOC_TYPE)
+    if not doc:
+        raise HTTPException(status_code=404, detail="No cover letter for this job/lane")
+    path = Path(doc["file_path"]).with_suffix(f".{fmt}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Cover letter file missing — regenerate it")
+
+    media_types = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "txt": "text/plain; charset=utf-8",
+    }
+    filename = await _download_filename(db, job_id, "cover_letter", fmt)
+    return FileResponse(path, media_type=media_types[fmt], filename=filename)
 
 
 @app.get("/api/tasks/status")

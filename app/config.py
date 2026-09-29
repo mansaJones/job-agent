@@ -35,6 +35,7 @@ LOGS_DIR: Path = PROJECT_ROOT / "logs"
 HTML_SNAPSHOTS_DIR: Path = DATA_DIR / "html_snapshots"
 RESUMES_DIR: Path = PROJECT_ROOT / "resumes"
 GENERATED_RESUMES_DIR: Path = DATA_DIR / "generated_resumes"
+GENERATED_COVER_LETTERS_DIR: Path = DATA_DIR / "generated_cover_letters"
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +258,7 @@ def load_settings() -> AppSettings:
 
     # Ensure critical directories exist
     for directory in [DATA_DIR, LOGS_DIR, HTML_SNAPSHOTS_DIR, DATA_DIR / "backups",
-                      GENERATED_RESUMES_DIR]:
+                      GENERATED_RESUMES_DIR, GENERATED_COVER_LETTERS_DIR]:
         directory.mkdir(parents=True, exist_ok=True)
 
     return AppSettings(

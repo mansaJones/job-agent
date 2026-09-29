@@ -68,6 +68,24 @@ class LinkedInData(BaseModel):
     def all_skills_lower(self) -> set[str]:
         return {s.lower().strip() for s in self.skills if s.strip()}
 
+    def to_prompt_text(self) -> str:
+        """Compact plain-text rendering for LLM prompts (no contact details)."""
+        lines = [self.full_name]
+        if self.headline:
+            lines.append(self.headline)
+        if self.summary:
+            lines += ["", "SUMMARY", self.summary]
+        if self.positions:
+            lines += ["", "EXPERIENCE"]
+            for p in self.positions:
+                lines.append(_position_header(p.title, p.company, p.location,
+                                              p.start_date, p.end_date))
+                lines += [f"- {b}" for b in p.bullets]
+        if self.skills:
+            lines += ["", "SKILLS", ", ".join(self.skills)]
+        lines += _education_and_certs(self.education, self.certifications)
+        return "\n".join(lines).strip()
+
 
 # ---------------------------------------------------------------------------
 # Output — a resume tailored to one job
@@ -99,3 +117,47 @@ class TailoredResume(BaseModel):
     matched_requirements: list[str] = Field(default_factory=list)
     unmatched_requirements: list[str] = Field(default_factory=list)
     fabrication_warnings: list[str] = Field(default_factory=list)
+
+    def to_prompt_text(self) -> str:
+        """Compact plain-text rendering for LLM prompts (headline, summary, positions, skills)."""
+        lines = [self.full_name]
+        if self.headline:
+            lines.append(self.headline)
+        if self.summary:
+            lines += ["", "SUMMARY", self.summary]
+        if self.positions:
+            lines += ["", "EXPERIENCE"]
+            for p in self.positions:
+                lines.append(_position_header(p.title, p.company, p.location,
+                                              p.start_date, p.end_date))
+                lines += [f"- {b.text}" for b in p.bullets]
+        if self.skills:
+            lines += ["", "SKILLS", ", ".join(self.skills)]
+        lines += _education_and_certs(self.education, self.certifications)
+        return "\n".join(lines).strip()
+
+
+# ---------------------------------------------------------------------------
+# Prompt-text helpers
+# ---------------------------------------------------------------------------
+
+def _position_header(title: str, company: str, location: str | None,
+                     start: str | None, end: str | None) -> str:
+    where = f" ({location})" if location else ""
+    return f"{title} — {company}{where}, {start or '?'} to {end or 'present'}"
+
+
+def _education_and_certs(education: list[Education],
+                         certifications: list[Certification]) -> list[str]:
+    lines: list[str] = []
+    if education:
+        lines += ["", "EDUCATION"]
+        for e in education:
+            detail = ", ".join(x for x in (e.degree, e.field_of_study) if x)
+            years = "–".join(y for y in (e.start_year, e.end_year) if y)
+            lines.append(" — ".join(x for x in (e.school, detail, years) if x))
+    if certifications:
+        lines += ["", "CERTIFICATIONS"]
+        lines += [" — ".join(x for x in (c.name, c.authority, c.issued) if x)
+                  for c in certifications]
+    return lines

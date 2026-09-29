@@ -234,6 +234,32 @@ tbody td {
 .fabrication-callout strong { color: var(--red); }
 .fabrication-callout ul { margin: 0.35rem 0 0 1.1rem; }
 
+/* Cover letter panel */
+.cover-letter-editor {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    resize: vertical;
+}
+.cover-letter-editor:focus { outline: none; border-color: var(--accent); }
+.context-warning {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--yellow);
+    border-radius: 6px;
+    background: var(--yellow-bg);
+    color: var(--yellow);
+    font-size: 0.85rem;
+}
+.saved-flash { animation: saved-fade 2.5s ease-out forwards; }
+@keyframes saved-fade { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
+
 /* Side-by-side lane evaluations on job detail */
 .lane-eval-grid {
     display: grid;

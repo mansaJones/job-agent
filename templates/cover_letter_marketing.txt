@@ -1,0 +1,10 @@
+TEMPLATE: Marketing / Marketing Technology Role
+
+STRUCTURE:
+- Opening: Connect to the company's marketing goals or product. Show awareness of their digital presence — their site, campaigns, or how they reach customers.
+- Paragraph 2: Campaign and program results — metrics, pipeline impact, conversion lifts, audience growth. Quantify wherever the candidate's experience supports it.
+- Paragraph 3: MarTech depth — AEM, Marketo, the analytics stack, and the hands-on HTML/JS/CSS work that lets the candidate ship without waiting on engineering. This is the differentiator for this lane; make it land.
+- Paragraph 4: Cross-functional leadership — working across product, sales, design, and engineering. Managing agencies or contractors if applicable.
+- Closing: Forward-looking, tied to the company's growth stage.
+
+TONE: Results-driven, strategic, technically fluent. Not salesy.

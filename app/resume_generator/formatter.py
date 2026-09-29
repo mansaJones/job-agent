@@ -1,6 +1,6 @@
-"""Render a TailoredResume to ATS-friendly PDF and DOCX.
+"""Render tailored resumes and cover letters to ATS-friendly PDF and DOCX.
 
-ATS rules (both formats): single column, no tables/text boxes/headers/footers/
+ATS rules (all documents): single column, no tables/text boxes/headers/footers/
 images, standard section headings in a fixed order, dates right-aligned on the
 company/title line (tab stop in DOCX, a right-aligned text run in PDF — never
 a table), skills as a comma-separated paragraph, real "•" bullets, Letter
@@ -10,9 +10,12 @@ size with 0.75" margins.
 from __future__ import annotations
 
 import logging
+import re
+from datetime import date
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from app.config import ContactConfig
 from app.resume_generator.models import TailoredResume
 
 logger = logging.getLogger(__name__)
@@ -168,10 +171,10 @@ def render_pdf(resume: TailoredResume, out_path: Path) -> Path:
 # DOCX (python-docx)
 # ---------------------------------------------------------------------------
 
-def render_docx(resume: TailoredResume, out_path: Path) -> Path:
+def _new_docx(body_pt: float = 10.5):  # type: ignore[no-untyped-def]
+    """New Document with Letter size, 0.75" margins, and a Calibri Normal style."""
     from docx import Document
     from docx.enum.section import WD_ORIENT
-    from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
     from docx.shared import Inches, Pt
 
     doc = Document()
@@ -181,11 +184,10 @@ def render_docx(resume: TailoredResume, out_path: Path) -> Path:
     section.page_width, section.page_height = Inches(8.5), Inches(11)
     for side in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
         setattr(section, side, Inches(0.75))
-    text_width = Inches(8.5 - 1.5)
 
     normal = doc.styles["Normal"]
     normal.font.name = "Calibri"
-    normal.font.size = Pt(10.5)
+    normal.font.size = Pt(body_pt)
     # East-Asian font slot too, or Word may substitute
     rpr = normal.element.get_or_add_rPr()
     rfonts = rpr.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rFonts")
@@ -194,6 +196,15 @@ def render_docx(resume: TailoredResume, out_path: Path) -> Path:
                    "Calibri")
     normal.paragraph_format.space_after = Pt(0)
     normal.paragraph_format.space_before = Pt(0)
+    return doc
+
+
+def render_docx(resume: TailoredResume, out_path: Path) -> Path:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+    from docx.shared import Inches, Pt
+
+    doc = _new_docx()
+    text_width = Inches(8.5 - 1.5)
 
     def para(text: str = "", bold: bool = False, size: float | None = None,
              center: bool = False, space_before: float = 0, space_after: float = 0):
@@ -261,4 +272,97 @@ def render_docx(resume: TailoredResume, out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(out_path))
     logger.info("Rendered resume DOCX → %s", out_path)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Cover letters
+# ---------------------------------------------------------------------------
+
+def cover_letter_contact_line(contact: ContactConfig) -> str:
+    return " | ".join(v for v in (contact.email, contact.phone, contact.linkedin_url,
+                                  contact.portfolio_url) if v)
+
+
+def letter_paragraphs(text: str) -> list[str]:
+    """Split a letter on blank lines; single newlines inside a paragraph are kept."""
+    return [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+
+
+def _today() -> str:
+    d = date.today()
+    return f"{d:%B} {d.day}, {d.year}"
+
+
+def render_cover_letter_pdf(
+    text: str, full_name: str, contact: ContactConfig, out_path: Path
+) -> Path:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    body = ParagraphStyle("Body", fontName="Helvetica", fontSize=11, leading=15,
+                          spaceAfter=10)
+    tight = ParagraphStyle("Tight", parent=body, spaceAfter=0)
+    name_style = ParagraphStyle("Name", fontName="Helvetica-Bold", fontSize=14, leading=18)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    margin = 0.75 * inch
+    doc = SimpleDocTemplate(
+        str(out_path), pagesize=letter,
+        leftMargin=margin, rightMargin=margin, topMargin=margin, bottomMargin=margin,
+        title=f"{full_name} — Cover Letter", author=full_name,
+    )
+
+    story: list = []
+    if full_name:
+        story.append(Paragraph(escape(full_name), name_style))
+    contact_line = cover_letter_contact_line(contact)
+    if contact_line:
+        story.append(Paragraph(escape(contact_line), tight))
+    story += [Spacer(1, 15), Paragraph(_today(), tight), Spacer(1, 15)]
+    for para in letter_paragraphs(text):
+        story.append(Paragraph(escape(para).replace("\n", "<br/>"), body))
+
+    doc.build(story)
+    logger.info("Rendered cover letter PDF → %s", out_path)
+    return out_path
+
+
+def render_cover_letter_docx(
+    text: str, full_name: str, contact: ContactConfig, out_path: Path
+) -> Path:
+    from docx.shared import Pt
+
+    doc = _new_docx(body_pt=11)
+
+    def para(value: str = "", bold: bool = False, size: float | None = None,
+             space_after: float = 0):
+        p = doc.add_paragraph()
+        lines = value.split("\n")
+        for i, line in enumerate(lines):
+            run = p.add_run(line)
+            run.bold = bold
+            if size:
+                run.font.size = Pt(size)
+            if i < len(lines) - 1:
+                run.add_break()
+        p.paragraph_format.space_after = Pt(space_after)
+        return p
+
+    if full_name:
+        para(full_name, bold=True, size=14)
+    contact_line = cover_letter_contact_line(contact)
+    if contact_line:
+        para(contact_line)
+    para()
+    para(_today())
+    para()
+    for paragraph in letter_paragraphs(text):
+        para(paragraph, space_after=10)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out_path))
+    logger.info("Rendered cover letter DOCX → %s", out_path)
     return out_path

@@ -583,20 +583,27 @@ def notify(
 
 
 # ------------------------------------------------------------------
-# polish command
+# polish / cover-letter commands
 # ------------------------------------------------------------------
+
+_CONTEXT_LABELS = {
+    "tailored_resume": "[green]tailored resume[/green]",
+    "linkedin_data": "[yellow]LinkedIn data only — run `job-agent resume` first for better alignment[/yellow]",
+    "static_pdf": "[yellow]static resume PDF — run `job-agent parse-linkedin` + `job-agent resume` for better alignment[/yellow]",
+}
+
 
 @app.command()
 def polish(
     job_id: int = typer.Option(
         ..., "--id", help="Job ID to generate a cover letter for.",
     ),
-    resume: Optional[str] = typer.Option(
-        None, "--resume", "-r",
-        help="Path to resume file (PDF/TXT). Default: auto-detect from resumes/.",
+    lane: str = typer.Option(..., "--lane", "-l", help="Search lane, e.g. frontend_developer."),
+    force: bool = typer.Option(
+        False, "--force", help="Regenerate even if cached or manually edited.",
     ),
 ) -> None:
-    """Generate a tailored cover letter for a job using Claude API."""
+    """Generate a lane-aware cover letter for a job using Claude API."""
     settings = _get_settings()
 
     if not settings.secrets.anthropic_api_key:
@@ -607,37 +614,69 @@ def polish(
         raise typer.Exit(1)
 
     async def _run() -> None:
-        from pathlib import Path as P
         from app.polisher.claude_client import ClaudeClient
         from app.polisher.pipeline import PolishPipeline
-
-        resume_path = P(resume) if resume else None
+        from app.resume_generator.pipeline import JobNotFoundError
 
         async with Database(settings.db_path) as db:
-            # Verify job exists
             job = await db.get_job(job_id)
             if not job:
                 console.print(f"[red]No job with ID {job_id}[/red]")
-                return
+                raise typer.Exit(1)
 
             console.print(f"[bold cyan]Generating cover letter for:[/bold cyan]")
-            console.print(f"  {job.title} @ {job.company or 'Unknown'}")
+            console.print(f"  {job.title} @ {job.company or 'Unknown'} [{lane}]")
 
             async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
-                pipeline = PolishPipeline(db, claude, settings, resume_path=resume_path)
-                result = await pipeline.polish_job(job_id)
+                pipeline = PolishPipeline(db, claude, settings)
+                try:
+                    result = await pipeline.polish_job(job_id, lane, force=force)
+                except (JobNotFoundError, ValueError, FileNotFoundError) as e:
+                    console.print(f"[red]{e}[/red]")
+                    raise typer.Exit(1)
 
-            if result is None:
-                console.print("[red]Cover letter generation failed — check logs.[/red]")
-                return
+        console.print(f"\n[dim]Context source:[/dim] "
+                      f"{_CONTEXT_LABELS.get(result.context_source, result.context_source)}")
+        if result.from_cache:
+            note = ("manually edited — kept" if result.edited
+                    else "served from cache")
+            console.print(f"[dim]{note.capitalize()}; use --force to regenerate.[/dim]")
+        elif result.gen_result:
+            g = result.gen_result
+            console.print(f"[dim]Model: {g.model_used} | "
+                          f"Tokens: {g.input_tokens} in / {g.output_tokens} out | "
+                          f"Cost: {g.cost_display}[/dim]")
 
-            console.print(f"\n[green]Cover letter generated![/green]")
-            console.print(f"[dim]Model: {result.model_used} | "
-                         f"Tokens: {result.input_tokens} in / {result.output_tokens} out | "
-                         f"Cost: {result.cost_display}[/dim]\n")
-            console.print("[bold]--- Cover Letter ---[/bold]\n")
-            console.print(result.cover_letter)
-            console.print(f"\n[dim]Saved to database — view at http://192.168.5.58:8080/jobs/{job_id}[/dim]")
+        console.print("\n[bold]--- Cover Letter ---[/bold]\n")
+        console.print(result.text)
+        console.print(f"\n  TXT:  {result.txt_path}\n  PDF:  {result.pdf_path}\n"
+                      f"  DOCX: {result.docx_path}")
+        console.print(f"[dim]Edit it at http://192.168.5.58:8080/jobs/{job_id}[/dim]")
+
+    asyncio.run(_run())
+
+
+# Same command under a name that matches `resume`
+app.command("cover-letter", help="Alias for `polish`.")(polish)
+
+
+@app.command("migrate-cover-letters")
+def migrate_cover_letters() -> None:
+    """One-time: move legacy evaluation cover letter drafts into editable files."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        from app.polisher.pipeline import PolishPipeline
+
+        async with Database(settings.db_path) as db:
+            pipeline = PolishPipeline(db, None, settings)
+            count = await pipeline.migrate_legacy_cover_letters()
+
+        if count:
+            console.print(f"[green]Migrated {count} legacy cover letter(s).[/green] "
+                          "They're now editable in the dashboard.")
+        else:
+            console.print("[dim]No legacy cover letters to migrate.[/dim]")
 
     asyncio.run(_run())
 

@@ -152,7 +152,8 @@ CREATE TABLE IF NOT EXISTS generated_documents (
     file_path TEXT NOT NULL,
     model_used TEXT,
     generated_at TEXT DEFAULT (datetime('now')),
-    content_hash TEXT
+    content_hash TEXT,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS apply_queue (
@@ -250,6 +251,8 @@ class Database:
             ("jobs", "search_lane",
              "ALTER TABLE jobs ADD COLUMN search_lane TEXT DEFAULT 'frontend_developer'"),
             ("evaluations", "search_lane", "ALTER TABLE evaluations ADD COLUMN search_lane TEXT"),
+            ("generated_documents", "updated_at",
+             "ALTER TABLE generated_documents ADD COLUMN updated_at TEXT"),
         ]
         for table, column, ddl in migrations:
             cursor = await self.conn.execute(f"PRAGMA table_info({table})")
@@ -493,8 +496,8 @@ class Database:
         cursor = await self.conn.execute(
             """
             INSERT INTO generated_documents (job_id, search_lane, doc_type, file_path,
-                                             model_used, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?)
+                                             model_used, content_hash, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
             """,
             (job_id, search_lane, doc_type, file_path, model_used, content_hash),
         )
@@ -513,6 +516,25 @@ class Database:
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def update_generated_document(
+        self, doc_id: int, content_hash: str | None, model_used: str | None
+    ) -> None:
+        """Update a generated document's hash/model in place (e.g. after a manual edit)."""
+        await self.conn.execute(
+            "UPDATE generated_documents SET content_hash = ?, model_used = ?, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (content_hash, model_used, doc_id),
+        )
+        await self.conn.commit()
+
+    async def get_generated_documents_for_job(self, job_id: int) -> list[dict]:
+        """All generated documents for a job — any lane, any type — newest first."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM generated_documents WHERE job_id = ? ORDER BY id DESC",
+            (job_id,),
+        )
+        return [dict(r) for r in await cursor.fetchall()]
 
     async def delete_generated_document(
         self, job_id: int, search_lane: str, doc_type: str

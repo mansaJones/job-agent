@@ -192,8 +192,9 @@ boards:
 | `job-agent dashboard --port 3000` | Start on a custom port |
 | `job-agent notify --test` | Send a test message to Telegram |
 | `job-agent notify --digest` | Send the daily digest to Telegram |
-| `job-agent polish --id 5` | Generate a cover letter for job #5 |
-| `job-agent polish --id 5 --resume ~/agent/resumes/resume.pdf` | Use a specific resume |
+| `job-agent polish --id 5 --lane frontend_developer` | Generate a cover letter for job #5 (alias: `cover-letter`) |
+| `job-agent polish --id 5 --lane frontend_developer --force` | Regenerate, replacing a cached or edited letter |
+| `job-agent migrate-cover-letters` | One-time: make pre-v2 cover letter drafts editable |
 | `job-agent parse-linkedin` | Parse `resumes/linkedin_export.zip` into `resumes/linkedin_data.json` |
 | `job-agent resume 5 --lane marketing_manager` | Generate a tailored resume (PDF + DOCX) for job #5 |
 | `job-agent resume 5 --lane marketing_manager --force` | Regenerate, ignoring the cache |
@@ -210,38 +211,6 @@ The local LLM scores each job from 0.0 to 1.0 against your profile:
 | < 0.4 | `rejected` | Auto-rejected (reason stored in DB) |
 
 Scoring rules: matching ANY must-have skill is a positive signal (not all required). Missing salary info is treated as neutral. Only clearly irrelevant jobs score below 0.3.
-
-## Cover Letter Generation (Phase 4)
-
-When you find a job worth applying to, generate a tailored cover letter using the Anthropic Claude API.
-
-### Setup
-
-1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
-2. Add to `config/secrets.env`:
-
-```env
-ANTHROPIC_API_KEY=sk-ant-your-key-here
-```
-
-3. Put your resume in the `resumes/` directory:
-
-```bash
-mkdir -p ~/agent/resumes
-# scp your resume from your PC
-```
-
-### Usage
-
-From the CLI:
-
-```bash
-job-agent polish --id 5
-```
-
-Or from the dashboard: open any job detail page and click "I want a cover letter for this one" to opt in, then "Generate Cover Letter". Cover letter generation is opt-in per job — it won't clutter the detail page unless you ask for it. Once generated, the letter is saved to the database and shown on the detail page with copy and regenerate buttons.
-
-The polisher automatically picks a template (leadership vs senior IC) based on the job title, sends your resume + the job description to Claude Sonnet, and gets back a tailored 3-4 paragraph letter. Cost is roughly $0.03 per letter.
 
 ## Tailored Resumes
 
@@ -295,6 +264,68 @@ The resumes are ATS-friendly:
 - Standard section order: Summary, Skills, Experience, Education, Certifications.
 - Dates right-aligned on the same line as company and title.
 - Real `•` bullets, Letter size with 0.75" margins.
+
+## Cover Letters
+
+Cover letters are written for one job **and** one search lane, from the best candidate data available. Every letter is saved as an editable text file.
+
+### Setup
+
+1. Get an API key at [console.anthropic.com](https://console.anthropic.com)
+2. Add to `config/secrets.env`:
+
+```env
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
+
+3. Run `job-agent parse-linkedin` (see [Tailored Resumes](#tailored-resumes)).
+
+### Recommended order: resume first, then cover letter
+
+```bash
+job-agent resume 42 --lane marketing_manager
+job-agent cover-letter --id 42 --lane marketing_manager   # alias of `polish`
+```
+
+The letter is written from the best candidate context it can find, in this order:
+
+1. **Tailored resume** for this job + lane (`data/generated_resumes/{id}_{lane}_resume.json`). The letter matches the resume you're sending.
+2. **LinkedIn data** (`resumes/linkedin_data.json` + `additional_bullets.json`). Works, but isn't aligned to this job's resume.
+3. **Static resume PDF** in `resumes/` whose filename contains the lane's `resume_version`.
+4. Nothing found → error pointing you at `job-agent parse-linkedin`.
+
+The CLI prints which source was used. The dashboard shows a yellow warning when a letter wasn't written from the tailored resume.
+
+### Template selection
+
+Templates in `templates/` give structure and tone guidance to Claude; they aren't fill-in-the-blank:
+
+| Lane | Job title | Template |
+|------|-----------|----------|
+| `marketing_manager` | any | `cover_letter_marketing.txt` |
+| `frontend_developer` | contains lead / manager / director / head / principal / vp | `cover_letter_frontend_lead.txt` |
+| `frontend_developer` | anything else | `cover_letter_frontend_ic.txt` |
+| any other lane | any | `cover_letter_general.txt` |
+
+### Editing
+
+On a job's detail page, the cover letter panel is an editable text box:
+- **Save edits** writes your text to `data/generated_cover_letters/{id}_{lane}_cover_letter.txt` and re-renders the PDF and DOCX.
+- Download the letter as PDF, DOCX, or TXT.
+
+Edited letters are marked `manual-edit` and are never overwritten by a normal generate. **Regenerate** asks for confirmation first. On the CLI, `--force` is required to replace an edited letter.
+
+A repeat request with the same job description, lane, and candidate context is served from cache at no cost. Cost is roughly $0.01–0.03 per letter.
+
+### Migrating old drafts
+
+Before v2, cover letters were stored in the database (`evaluations.cover_letter_draft`). Those still show on the job page as a read-only "legacy draft". Run this once to turn them into editable files:
+
+```bash
+job-agent migrate-cover-letters
+```
+
+It's safe to re-run: a job + lane that already has a cover letter is skipped. Migrated drafts are kept like manual edits until you regenerate them.
 
 ## Adaptive Scraper Health
 
