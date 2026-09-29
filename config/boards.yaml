@@ -1,7 +1,7 @@
 # config/boards.yaml — Per-board scraper configuration
 # Each board gets its own scraping params and rate-limit settings.
 #
-# Shared values (location, search_queries, radius) are inherited from
+# Shared values (location, radius) are inherited from
 # profile.yaml by default. You can override them per-board if needed.
 # If a field is omitted or empty, the profile value is used.
 
@@ -10,7 +10,7 @@ boards:
     enabled: true
     module: "app.scrapers.indeed"
     base_url: "https://www.indeed.com"
-    # search_queries: inherited from profile.target_roles (lowercased)
+    # search_queries: built per lane from each search lane's target_roles (lowercased)
     # location: inherited from profile.preferences.location
     # radius_miles: inherited from profile.preferences.max_commute_miles
     max_pages: 3
@@ -23,7 +23,7 @@ boards:
     enabled: true
     module: "app.scrapers.linkedin"
     base_url: "https://www.linkedin.com"
-    # search_queries: inherited from profile.target_roles (lowercased)
+    # search_queries: built per lane from each search lane's target_roles (lowercased)
     # location: inherited from profile.preferences.location
     # radius_miles: inherited from profile.preferences.max_commute_miles
     max_pages: 3
@@ -36,7 +36,7 @@ boards:
     enabled: true
     module: "app.scrapers.dice"
     base_url: "https://www.dice.com"
-    # search_queries: inherited from profile.target_roles (lowercased)
+    # search_queries: built per lane from each search lane's target_roles (lowercased)
     # location: inherited from profile.preferences.location
     # radius_miles: inherited from profile.preferences.max_commute_miles
     max_pages: 3
@@ -49,7 +49,8 @@ boards:
     enabled: true
     module: "app.scrapers.usajobs"
     base_url: "https://data.usajobs.gov"
-    # Override with government-style job titles (federal postings use different terminology)
+    # Override with government-style job titles (federal postings use different terminology).
+    # Explicit queries run once per enabled search lane.
     search_queries:
       - "software developer"
       - "IT specialist"

@@ -48,6 +48,24 @@
     </div>
 </div>
 
+<!-- Per-lane counts ('both' = found by more than one lane) -->
+{% if stats.by_lane %}
+<div class="stats-grid">
+    {% for lane_name in lanes %}
+    <a class="stat-card" href="/jobs?lane={{ lane_name }}" style="text-decoration: none; color: inherit;">
+        <div class="stat-value">{{ stats.by_lane.get(lane_name, 0) }}</div>
+        <div class="stat-label"><span class="lane-badge lane-{{ lane_name }}">{{ lane_name|humanize_lane }}</span></div>
+    </a>
+    {% endfor %}
+    {% if stats.by_lane.get('both') %}
+    <div class="stat-card">
+        <div class="stat-value">{{ stats.by_lane.get('both', 0) }}</div>
+        <div class="stat-label"><span class="lane-badge lane-both">Both Lanes</span></div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
 <!-- Top Matches -->
 <div class="card">
     <h2>Top Matches</h2>

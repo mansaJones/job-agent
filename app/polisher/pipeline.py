@@ -92,11 +92,17 @@ class PolishPipeline:
 
         # Fallback: build a summary from profile.yaml
         profile = self.settings.profile
+        lanes = profile.enabled_lanes
+
+        def _merged(values: list[list[str]]) -> str:
+            # Union across lanes, order-preserving
+            return ", ".join(dict.fromkeys(v for vs in values for v in vs))
+
         lines = [
-            f"Target Roles: {', '.join(profile.target_roles)}",
+            f"Target Roles: {_merged([l.target_roles for l in lanes])}",
             f"Years of Experience: {profile.preferences.experience_years}",
-            f"Core Skills: {', '.join(profile.skills.must_have)}",
-            f"Additional Skills: {', '.join(profile.skills.nice_to_have)}",
+            f"Core Skills: {_merged([l.skills.must_have + l.skills.must_have_any for l in lanes])}",
+            f"Additional Skills: {_merged([l.skills.nice_to_have for l in lanes])}",
             f"Location: {profile.preferences.location}",
         ]
         self._resume_text = "\n".join(lines)

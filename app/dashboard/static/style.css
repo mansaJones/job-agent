@@ -200,6 +200,35 @@ tbody td {
 .badge-blue { background: var(--blue-bg); color: var(--blue); }
 .badge-neutral { background: var(--bg-secondary); color: var(--text-muted); }
 
+/* Search lane badges */
+.lane-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    vertical-align: middle;
+}
+.lane-frontend_developer { background: rgba(14, 165, 233, 0.14); color: #38bdf8; }
+.lane-marketing_manager { background: rgba(236, 72, 153, 0.14); color: #f472b6; }
+.lane-both { background: rgba(168, 85, 247, 0.16); color: #c084fc; }
+
+/* Lane filter row sits above status tabs — slightly quieter */
+.lane-tabs .filter-tab { font-size: 0.8rem; padding: 0.3rem 0.85rem; }
+
+/* Side-by-side lane evaluations on job detail */
+.lane-eval-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+}
+@media (min-width: 640px) {
+    .lane-eval-grid { grid-template-columns: 1fr 1fr; }
+}
+
 /* Status filter tabs */
 .filter-tabs {
     display: flex;

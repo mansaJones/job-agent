@@ -79,33 +79,44 @@ All shared config lives in `profile.yaml` — boards inherit from it automatical
 
 ### profile.yaml (single source of truth)
 
-```yaml
-target_roles:
-  - "Lead Frontend Developer"
-  - "Web Development Lead"
-  - "Front End Engineering Manager"
-  - "Senior Frontend Developer"
-  - "Development Manager"
+Roles and skills are organized into **search lanes** — independent role families that are scraped and scored separately. `preferences`, `blacklist`, and `maintenance` are shared across all lanes.
 
-skills:
-  must_have:       # LLM matches on ANY of these, not all
-    - "JavaScript"
-    - "React"
-    - "TypeScript"
-    - "HTML"
-    - "CSS"
-  nice_to_have:    # Bonus points
-    - "Node.js"
-    - "AEM"
-    - "Angular"
-    - "Python"
-    - "Azure"
-    - "CI/CD"
-    - "RESTful APIs"
-    - "SQL"
-    - "Git"
-    - "Redux"
-    - "Bootstrap"
+```yaml
+search_lanes:
+  frontend_developer:
+    enabled: true
+    target_roles:
+      - "Lead Frontend Developer"
+      - "Senior Frontend Developer"
+      - "Development Manager"
+    target_field: "software/web development, engineering management"
+    skills:
+      must_have:       # LLM matches on ANY of these, not all
+        - "JavaScript"
+        - "React"
+        - "TypeScript"
+      nice_to_have:    # Bonus points
+        - "Node.js"
+        - "AEM"
+    resume_version: "frontend_developer"
+
+  marketing_manager:
+    enabled: true
+    target_roles:
+      - "Marketing Manager"
+      - "Digital Marketing Manager"
+      - "Marketing Technology Manager"
+    target_field: "digital marketing, marketing technology, web marketing operations"
+    skills:
+      must_have_any:   # Gate: job must list at least ONE of these, or score caps at 0.35
+        - "AEM"
+        - "Adobe Experience Manager"
+        - "HTML"
+        - "JavaScript"
+      nice_to_have:
+        - "Marketo"
+        - "Adobe Analytics"
+    resume_version: "marketing_manager"
 
 preferences:
   location: "Homewood, IL"
@@ -125,11 +136,24 @@ blacklist:
     - "clearance required"
     - "junior"
     - "entry level"
+
+maintenance:
+  stale_listing_max_age_days: 30   # purge listings scraped longer ago than this
+  preserve_statuses:               # ...unless they have one of these statuses
+    - "approved"
+    - "applied"
 ```
+
+#### How lanes work
+
+- **Scraping:** every scraper runs each enabled lane in turn, using that lane's `target_roles` (lowercased) as search queries. Each job is tagged with the lane that found it. If a second lane finds the same URL, the job is tagged `both`.
+- **Evaluation:** a job is scored against its own lane's roles, field, and skills. A `both` job is scored once per lane, and its status is set by the **highest** lane score.
+- **Dashboard:** the Jobs page has a lane filter row above the status tabs (a lane filter includes `both` jobs). Each job shows a lane badge, and `both` jobs show their per-lane evaluations side by side.
+- Set `enabled: false` to pause a lane without deleting it. Jobs scraped before lanes existed are migrated to `frontend_developer`.
 
 ### boards.yaml (board-specific overrides only)
 
-Boards inherit `location`, `search_queries`, and `radius_miles` from profile.yaml unless explicitly overridden.
+Boards inherit `location` and `radius_miles` from profile.yaml unless explicitly overridden. Search queries come from the search lanes (see above); a board that sets explicit `search_queries` (like `usajobs`, which uses federal job titles) runs those once per enabled lane instead.
 
 ```yaml
 boards:
@@ -345,6 +369,7 @@ The built-in scheduler runs scraping and evaluation on autopilot:
 - Weekday scrapes every 6 hours
 - Nightly scrape + evaluate at 2:00 AM
 - Eval catch-up at 3:30 AM
+- Stale listing purge at 4:00 AM: deletes jobs scraped more than `maintenance.stale_listing_max_age_days` ago, unless their status is in `preserve_statuses` (default: approved, applied). Their evaluations, decisions, and applied records are deleted too. If a single run purges more than 100 jobs, you get a Telegram alert, since that usually means a config mistake.
 
 Start with: `job-agent run-scheduler` (or set up as a systemd service)
 

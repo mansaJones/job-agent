@@ -119,6 +119,17 @@ def _format_salary(sal_min: float | None, sal_max: float | None) -> str:
     return "Not listed"
 
 
+def _humanize_lane(lane: str | None) -> str:
+    """'frontend_developer' → 'Frontend Developer'."""
+    if not lane:
+        return "Unassigned"
+    return lane.replace("_", " ").title()
+
+
+def _enabled_lane_names() -> list[str]:
+    return [lane.name for lane in get_settings().profile.enabled_lanes]
+
+
 # Register filters for Jinja2
 templates.env.filters["score_color"] = _score_color
 templates.env.filters["format_salary"] = lambda row: _format_salary(
@@ -126,6 +137,7 @@ templates.env.filters["format_salary"] = lambda row: _format_salary(
 )
 templates.env.globals["score_color"] = _score_color
 templates.env.globals["format_salary"] = _format_salary
+templates.env.filters["humanize_lane"] = _humanize_lane
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +162,7 @@ async def index(request: Request):
         "top_matches": top_matches,
         "recent_maybes": recent_maybes,
         "running_tasks": _running_tasks,
+        "lanes": _enabled_lane_names(),
     })
 
 
@@ -161,15 +174,16 @@ async def jobs_page(
     limit: int = Query(20, ge=1, le=100),
     sort: str = Query("date_scraped"),
     dir: str = Query("DESC"),
+    lane: str | None = Query(None),
 ):
-    """Job list page with filters."""
+    """Job list page with status + lane filters."""
     db = get_db()
     offset = (page - 1) * limit
     jobs, total = await db.get_jobs_paginated(
-        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir
+        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir, lane=lane,
     )
     total_pages = max(1, (total + limit - 1) // limit)
-    all_stats = await db.get_stats()
+    all_stats = await db.get_stats(lane=lane)
 
     ctx = {
         "request": request,
@@ -181,11 +195,14 @@ async def jobs_page(
         "current_status": status,
         "current_sort": sort,
         "current_dir": dir,
+        "current_lane": lane,
+        "lanes": _enabled_lane_names(),
         "stats": all_stats,
     }
 
-    # If HTMX request, return just the table partial
-    if request.headers.get("HX-Request"):
+    # HTMX pagination swaps just the table; filter tabs swap the whole view
+    # (full page + hx-select) so both tab rows re-render with the new filters.
+    if request.headers.get("HX-Request") and request.headers.get("HX-Target") == "job-list":
         return templates.TemplateResponse("partials/job_table.html", ctx)
 
     return templates.TemplateResponse("jobs.html", ctx)
@@ -199,9 +216,17 @@ async def job_detail_page(request: Request, job_id: int):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # Jobs found by multiple lanes get one evaluation per lane, shown side by side
+    lane_evals = []
+    if job.get("search_lane") == "both":
+        for lane_name in _enabled_lane_names():
+            evaluation = await db.get_evaluation(job_id, lane=lane_name)
+            lane_evals.append({"lane": lane_name, "eval": evaluation})
+
     return templates.TemplateResponse("job_detail.html", {
         "request": request,
         "job": job,
+        "lane_evals": lane_evals,
     })
 
 
@@ -223,11 +248,12 @@ async def api_jobs(
     offset: int = Query(0, ge=0),
     sort: str = Query("date_scraped"),
     dir: str = Query("DESC"),
+    lane: str | None = Query(None),
 ):
     """List jobs with evaluation data."""
     db = get_db()
     jobs, total = await db.get_jobs_paginated(
-        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir,
+        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir, lane=lane,
     )
     return {"jobs": jobs, "total": total}
 

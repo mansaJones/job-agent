@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app.config import ProfileConfig
+from app.config import ProfileConfig, SearchLaneConfig
 from app.database import Database, EvaluationRecord, JobRecord
 from app.evaluator.ollama_client import OllamaClient, OllamaError
 
@@ -80,6 +80,7 @@ SENIORITY (critical — candidate has {experience_years} years experience):
 SKILLS (match on ANY, not ALL):
 - Core skills: {must_have_skills}
 - Bonus skills: {nice_to_have_skills}
+- Gate skills (job must list at least ONE, or cap at 0.35): {must_have_any_skills}
 - Matching 1 core skill = positive signal. 2-3 = strong. 4+ = excellent.
 - Bonus skills add +0.05 each (max +0.15 total)
 
@@ -93,7 +94,7 @@ LOCATION:
 - If job requires onsite and onsite_ok is False → subtract 0.15
 
 FIELD RELEVANCE:
-- Target field: software/web development, engineering management
+- Target field: {target_field}
 - Medical, legal, clerical, mechanical, accounting, HR roles → cap at 0.15 regardless of skills listed
 - Government IT/software roles ARE relevant — score them normally
 
@@ -115,12 +116,16 @@ Description:
 {{"score": 0.0, "reasoning": "2-3 sentences", "red_flags": ["concern1"], "highlights": ["positive1"]}}"""
 
 
-def build_profile_context(profile: ProfileConfig) -> dict[str, str]:
-    """Flatten the profile config into template-friendly strings."""
+def build_profile_context(
+    profile: ProfileConfig, lane: SearchLaneConfig
+) -> dict[str, str | int]:
+    """Flatten a search lane + shared preferences into template-friendly strings."""
     return {
-        "target_roles": ", ".join(profile.target_roles),
-        "must_have_skills": ", ".join(profile.skills.must_have),
-        "nice_to_have_skills": ", ".join(profile.skills.nice_to_have),
+        "target_roles": ", ".join(lane.target_roles),
+        "target_field": lane.target_field or "not specified",
+        "must_have_skills": ", ".join(lane.skills.must_have) or "None specified",
+        "must_have_any_skills": ", ".join(lane.skills.must_have_any) or "None (no gate)",
+        "nice_to_have_skills": ", ".join(lane.skills.nice_to_have) or "None specified",
         "location": profile.preferences.location,
         "remote_ok": str(profile.preferences.remote_ok),
         "hybrid_ok": str(profile.preferences.hybrid_ok),
@@ -150,9 +155,9 @@ def _smart_truncate(description: str, max_chars: int = 4000) -> str:
     return f"{head}\n[... middle section trimmed ...]\n{tail}"
 
 
-def build_eval_prompt(profile: ProfileConfig, job: JobRecord) -> str:
-    """Build the full evaluation prompt for a single job."""
-    ctx = build_profile_context(profile)
+def build_eval_prompt(profile: ProfileConfig, lane: SearchLaneConfig, job: JobRecord) -> str:
+    """Build the full evaluation prompt for a single job against one search lane."""
+    ctx = build_profile_context(profile, lane)
 
     # Format salary range for display
     if job.salary_min and job.salary_max:
@@ -290,9 +295,31 @@ class EvaluationPipeline:
         else:
             return "rejected"
 
-    async def evaluate_job(self, job: JobRecord) -> EvalResult | None:
-        """Evaluate a single job. Returns the result or None on failure."""
-        prompt = build_eval_prompt(self.profile, job)
+    def _lanes_for_job(self, job: JobRecord) -> list[SearchLaneConfig]:
+        """Resolve which enabled lanes a job should be evaluated against.
+
+        'both' → every enabled lane. A single lane → that lane. Unknown or
+        disabled lane (e.g. legacy rows) → fall back to the first enabled lane.
+        """
+        enabled = self.profile.enabled_lanes
+        if job.search_lane == "both":
+            return enabled
+        for lane in enabled:
+            if lane.name == job.search_lane:
+                return [lane]
+        if enabled:
+            logger.warning(
+                "Job #%s has lane '%s' which is not enabled — evaluating against '%s'",
+                job.id, job.search_lane, enabled[0].name,
+            )
+            return [enabled[0]]
+        return []
+
+    async def _evaluate_lane(
+        self, job: JobRecord, lane: SearchLaneConfig
+    ) -> EvalResult | None:
+        """Run a single LLM evaluation of a job against one lane and store it."""
+        prompt = build_eval_prompt(self.profile, lane, job)
 
         try:
             raw_response = await self.ollama.generate(
@@ -302,7 +329,7 @@ class EvaluationPipeline:
                 format_json=True,
             )
         except OllamaError as e:
-            logger.error("Ollama error evaluating job %s: %s", job.id, e)
+            logger.error("Ollama error evaluating job %s [%s]: %s", job.id, lane.name, e)
             return None
 
         result = parse_eval_response(raw_response)
@@ -313,20 +340,48 @@ class EvaluationPipeline:
             model_used=self.ollama.model,
             match_score=result.score,
             reasoning=result.reasoning,
+            search_lane=lane.name,
         )
         await self.db.insert_evaluation(eval_record)
 
-        # Update job status based on score
-        new_status = self._classify(result.score)
+        logger.info(
+            "Job #%d [%s @ %s] lane=%s → score=%.2f",
+            job.id, job.title, job.company, lane.name, result.score,
+        )
+        return result
+
+    async def evaluate_job(self, job: JobRecord) -> list[EvalResult]:
+        """Evaluate a job against each lane that applies to it.
+
+        Returns one EvalResult per successful lane evaluation (empty list on
+        total failure). The job's status is set from the highest lane score.
+        """
+        lanes = self._lanes_for_job(job)
+        if not lanes:
+            logger.error("No enabled search lanes — cannot evaluate job %s", job.id)
+            return []
+
+        results: list[EvalResult] = []
+        for lane in lanes:
+            result = await self._evaluate_lane(job, lane)
+            if result is not None:
+                results.append(result)
+
+        if not results:
+            return []
+
+        # Best lane wins — a job only needs to fit one of your role families
+        best = max(results, key=lambda r: r.score)
+        new_status = self._classify(best.score)
 
         # Build rejection reason for rejected jobs so we know why
         rejection_reason = None
         if new_status == "rejected":
-            parts = [f"Score {result.score:.2f}"]
-            if result.reasoning:
-                parts.append(result.reasoning)
-            if result.red_flags:
-                parts.append(f"Red flags: {', '.join(result.red_flags)}")
+            parts = [f"Score {best.score:.2f}"]
+            if best.reasoning:
+                parts.append(best.reasoning)
+            if best.red_flags:
+                parts.append(f"Red flags: {', '.join(best.red_flags)}")
             rejection_reason = " | ".join(parts)
 
         await self.db.update_job_status(
@@ -334,11 +389,11 @@ class EvaluationPipeline:
         )
 
         logger.info(
-            "Job #%d [%s @ %s] → score=%.2f status=%s",
-            job.id, job.title, job.company, result.score, new_status,
+            "Job #%d [%s @ %s] lane=%s → best score=%.2f status=%s",
+            job.id, job.title, job.company, job.search_lane, best.score, new_status,
         )
 
-        return result
+        return results
 
     async def run(self, limit: int = 100) -> PipelineStats:
         """Evaluate all unevaluated ('new') jobs.
@@ -378,14 +433,15 @@ class EvaluationPipeline:
         logger.info("Starting evaluation of %d jobs with model '%s'", len(new_jobs), self.ollama.model)
 
         for job in new_jobs:
-            result = await self.evaluate_job(job)
+            results = await self.evaluate_job(job)
 
-            if result is None:
+            if not results:
                 stats.errors += 1
                 continue
 
+            # Count per job, not per lane-evaluation
             stats.evaluated += 1
-            status = self._classify(result.score)
+            status = self._classify(max(r.score for r in results))
             if status == "evaluated":
                 stats.ready_for_review += 1
             elif status == "maybe":

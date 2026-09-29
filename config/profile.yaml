@@ -1,32 +1,64 @@
 # config/profile.yaml — Your target job profile
 # Edit these values to match what you're actually looking for.
+#
+# Each search lane is an independent role family with its own target roles
+# and skills. Scrapers run every enabled lane; preferences and blacklist are
+# shared across all lanes.
 
-target_roles:
-  - "Lead Frontend Developer"
-  - "Web Development Lead"
-  - "Front End Engineering Manager"
-  - "Senior Frontend Developer"
-  - "Development Manager"
+search_lanes:
+  frontend_developer:
+    enabled: true
+    target_roles:
+      - "Lead Frontend Developer"
+      - "Web Development Lead"
+      - "Front End Engineering Manager"
+      - "Senior Frontend Developer"
+      - "Development Manager"
+    target_field: "software/web development, engineering management"
+    skills:
+      must_have:
+        - "JavaScript"
+        - "React"
+        - "TypeScript"
+        - "HTML"
+        - "CSS"
+      nice_to_have:
+        - "Node.js"
+        - "AEM"
+        - "Angular"
+        - "Python"
+        - "Azure"
+        - "CI/CD"
+        - "RESTful APIs"
+        - "SQL"
+        - "Git"
+        - "Redux"
+        - "Bootstrap"
+    resume_version: "frontend_developer"
 
-skills:
-  must_have:
-    - "JavaScript"
-    - "React"
-    - "TypeScript"
-    - "HTML"
-    - "CSS"
-  nice_to_have:
-    - "Node.js"
-    - "AEM"
-    - "Angular"
-    - "Python"
-    - "Azure"
-    - "CI/CD"
-    - "RESTful APIs"
-    - "SQL"
-    - "Git"
-    - "Redux"
-    - "Bootstrap"
+  marketing_manager:
+    enabled: true
+    target_roles:
+      - "Marketing Manager"
+      - "Digital Marketing Manager"
+      - "Marketing Technology Manager"
+      - "MarTech Manager"
+      - "Web Marketing Manager"
+    target_field: "digital marketing, marketing technology, web marketing operations"
+    skills:
+      must_have_any:
+        - "AEM"
+        - "Adobe Experience Manager"
+        - "HTML"
+        - "JavaScript"
+      nice_to_have:
+        - "Marketo"
+        - "Adobe Analytics"
+        - "CSS"
+        - "Marketing Automation"
+        - "SEO"
+        - "Google Analytics"
+    resume_version: "marketing_manager"
 
 preferences:
   location: "Homewood, IL"
@@ -46,3 +78,9 @@ blacklist:
     - "clearance required"
     - "junior"
     - "entry level"
+
+maintenance:
+  stale_listing_max_age_days: 30
+  preserve_statuses:
+    - "approved"
+    - "applied"

@@ -7,7 +7,9 @@
 </div>
 
 <div class="detail-header">
-    <h1>{{ job.title }}</h1>
+    <h1>{{ job.title }}
+        <span class="lane-badge lane-{{ job.search_lane or 'none' }}">{{ job.search_lane|humanize_lane }}</span>
+    </h1>
     <div class="detail-meta">
         <span>{{ job.company or 'Unknown Company' }}</span>
         <span>{{ job.location or 'Location N/A' }}</span>
@@ -22,6 +24,44 @@
 <div id="decision-area" style="margin-bottom: 1.5rem;">
     {% include "partials/decision_badge.html" %}
 </div>
+
+{% if lane_evals %}
+<!-- Found by multiple lanes — compare how it scored against each -->
+<div class="card">
+    <h2>Evaluations by Lane</h2>
+    <div class="lane-eval-grid">
+        {% for item in lane_evals %}
+        <div class="eval-breakdown">
+            <div class="eval-item">
+                <div class="label">Lane</div>
+                <div class="value">
+                    <span class="lane-badge lane-{{ item.lane }}">{{ item.lane|humanize_lane }}</span>
+                    {% if item.eval and item.eval.match_score is not none %}
+                    <span class="score {{ score_color(item.eval.match_score) }}">{{ "%.2f"|format(item.eval.match_score) }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% if item.eval %}
+            {% if item.eval.reasoning %}
+            <div class="eval-item">
+                <div class="label">Reasoning</div>
+                <div class="value">{{ item.eval.reasoning }}</div>
+            </div>
+            {% endif %}
+            <div class="eval-item">
+                <div class="label">Model</div>
+                <div class="value" style="color: var(--text-muted);">{{ item.eval.model_used }}</div>
+            </div>
+            {% else %}
+            <div class="eval-item">
+                <div class="value" style="color: var(--text-muted);">Not evaluated for this lane yet.</div>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
 
 <div class="detail-grid">
     <!-- Left column: Description + Cover Letter -->
@@ -94,7 +134,7 @@
     <!-- Right column: Evaluation + Meta -->
     <div>
         <!-- Evaluation -->
-        {% if job.eval_score is not none %}
+        {% if job.eval_score is not none and not lane_evals %}
         <div class="card">
             <h2>Evaluation</h2>
             <div class="eval-breakdown">
@@ -136,6 +176,10 @@
         <div class="card">
             <h2>Details</h2>
             <div class="eval-breakdown">
+                <div class="eval-item">
+                    <div class="label">Search Lane</div>
+                    <div class="value">{{ job.search_lane|humanize_lane }}</div>
+                </div>
                 <div class="eval-item">
                     <div class="label">Source</div>
                     <div class="value">{{ job.source }}</div>

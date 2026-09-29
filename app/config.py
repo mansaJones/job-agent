@@ -41,7 +41,20 @@ HTML_SNAPSHOTS_DIR: Path = DATA_DIR / "html_snapshots"
 
 class SkillsConfig(BaseModel):
     must_have: list[str] = Field(default_factory=list)
+    # Gate skills — a job must list at least ONE of these to score well
+    must_have_any: list[str] = Field(default_factory=list)
     nice_to_have: list[str] = Field(default_factory=list)
+
+
+class SearchLaneConfig(BaseModel):
+    """One role family to search for (e.g. frontend dev vs. marketing manager)."""
+
+    name: str
+    enabled: bool = True
+    target_roles: list[str] = Field(default_factory=list)
+    target_field: str = ""
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    resume_version: str = ""
 
 
 class PreferencesConfig(BaseModel):
@@ -64,13 +77,29 @@ class BlacklistConfig(BaseModel):
         return [entry.lower().strip() for entry in v] if v else []
 
 
+class MaintenanceConfig(BaseModel):
+    """Housekeeping settings — stale listing purge, etc."""
+
+    stale_listing_max_age_days: int = 30
+    preserve_statuses: list[str] = Field(default_factory=lambda: ["approved", "applied"])
+
+
 class ProfileConfig(BaseModel):
     """Your target job profile — loaded from config/profile.yaml."""
 
-    target_roles: list[str] = Field(default_factory=list)
-    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    search_lanes: dict[str, SearchLaneConfig] = Field(default_factory=dict)
     preferences: PreferencesConfig = Field(default_factory=PreferencesConfig)
     blacklist: BlacklistConfig = Field(default_factory=BlacklistConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
+
+    @property
+    def enabled_lanes(self) -> list[SearchLaneConfig]:
+        """Lanes with enabled=True, in config order."""
+        return [lane for lane in self.search_lanes.values() if lane.enabled]
+
+    def get_lane(self, name: str) -> SearchLaneConfig | None:
+        """Look up a lane by name (enabled or not)."""
+        return self.search_lanes.get(name)
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +184,12 @@ def load_profile(path: Path | None = None) -> ProfileConfig:
     """Load job profile from YAML."""
     path = path or CONFIG_DIR / "profile.yaml"
     raw = _load_yaml(path)
+    for name, lane_data in (raw.get("search_lanes") or {}).items():
+        lane_data["name"] = name
     config = ProfileConfig(**raw)
-    logger.info("Loaded profile: %d target roles, %d must-have skills",
-                len(config.target_roles), len(config.skills.must_have))
+    enabled = [lane.name for lane in config.enabled_lanes]
+    logger.info("Loaded profile: %d search lanes (%d enabled: %s)",
+                len(config.search_lanes), len(enabled), ", ".join(enabled) or "none")
     return config
 
 
@@ -184,16 +216,13 @@ def _resolve_board_defaults(boards: BoardsConfig, profile: ProfileConfig) -> Non
     """Fill in board-level gaps from profile — profile.yaml is the single source of truth.
 
     Rules:
-      - If a board has no search_queries → generate from profile.target_roles (lowercased)
+      - search_queries are NOT inherited — a board with none gets its queries
+        built per lane at scrape time from each lane's target_roles. A board
+        with explicit search_queries runs them once per enabled lane.
       - If a board has no location → use profile.preferences.location
-      - If a board has no radius_miles (0) → use profile.preferences.max_commute_miles
+      - If a board has no radius_miles (None) → use profile.preferences.max_commute_miles
     """
     for board in boards.boards.values():
-        if not board.search_queries:
-            board.search_queries = [r.lower() for r in profile.target_roles]
-            logger.debug("Board '%s': inherited %d search queries from profile",
-                         board.name, len(board.search_queries))
-
         if not board.location:
             board.location = profile.preferences.location
             logger.debug("Board '%s': inherited location '%s' from profile",

@@ -1,19 +1,25 @@
 """Standalone tests for the job agent core — runs with stdlib only.
 
-No external dependencies needed. Tests the database schema, config YAML
-parsing, salary parser, and blacklist logic.
+Tests the database schema, config YAML parsing, salary parser, and blacklist
+logic with stdlib only. The search lane, stale-listing purge, and per-lane
+eval prompt tests import `app`, so run with the project venv.
 
 Run: python3 tests/test_core.py
 """
 
+import asyncio
 import json
 import os
 import re
 import sqlite3
 import sys
+import tempfile
 import textwrap
 import yaml
 from pathlib import Path
+
+# Make `app` importable when run as `python tests/test_core.py`
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 PASS = 0
 FAIL = 0
@@ -66,7 +72,8 @@ def test_database() -> None:
     tables = [r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()]
-    expected_tables = ["applied", "decisions", "evaluations", "jobs"]
+    expected_tables = ["applied", "apply_queue", "decisions", "evaluations",
+                       "generated_documents", "jobs"]
     check("All tables created", all(t in tables for t in expected_tables), str(tables))
 
     # Verify indexes exist
@@ -198,9 +205,16 @@ def test_config() -> None:
     with open(profile_path) as f:
         profile = yaml.safe_load(f)
 
-    check("Has target_roles", "target_roles" in profile and len(profile["target_roles"]) > 0,
-          str(profile.get("target_roles")))
-    check("Has skills.must_have", len(profile.get("skills", {}).get("must_have", [])) > 0)
+    lanes = profile.get("search_lanes", {})
+    check("Has search_lanes", len(lanes) >= 2, str(list(lanes)))
+    check("No top-level target_roles/skills (moved into lanes)",
+          "target_roles" not in profile and "skills" not in profile)
+    check("Frontend lane has must_have skills",
+          len(lanes.get("frontend_developer", {}).get("skills", {}).get("must_have", [])) > 0)
+    check("Marketing lane has must_have_any gate",
+          len(lanes.get("marketing_manager", {}).get("skills", {}).get("must_have_any", [])) > 0)
+    check("Has maintenance.stale_listing_max_age_days",
+          isinstance(profile.get("maintenance", {}).get("stale_listing_max_age_days"), int))
     check("Has preferences", "preferences" in profile)
     check("Has blacklist", "blacklist" in profile)
     check("salary_min is a number", isinstance(profile["preferences"]["salary_min"], (int, float)))
@@ -217,7 +231,10 @@ def test_config() -> None:
 
     indeed = boards["boards"]["indeed"]
     check("Indeed has module path", "module" in indeed, indeed.get("module", ""))
-    check("Indeed has search_queries", len(indeed.get("search_queries", [])) > 0)
+    check("Indeed builds queries per lane (no explicit search_queries)",
+          not indeed.get("search_queries"))
+    check("USAJobs keeps explicit search_queries",
+          len(boards["boards"]["usajobs"].get("search_queries", [])) > 0)
     check("Indeed has delay settings", "delay_min" in indeed and "delay_max" in indeed)
     check("delay_min < delay_max", indeed["delay_min"] < indeed["delay_max"],
           f"{indeed['delay_min']} < {indeed['delay_max']}")
@@ -364,6 +381,239 @@ def test_html_parsing() -> None:
 
 
 # =====================================================================
+# Search lane config tests (uses app.config)
+# =====================================================================
+
+LANES_YAML = textwrap.dedent("""\
+    search_lanes:
+      frontend_developer:
+        enabled: true
+        target_roles: ["Lead Frontend Developer"]
+        target_field: "software/web development"
+        skills:
+          must_have: ["JavaScript", "React"]
+          nice_to_have: ["Node.js"]
+      marketing_manager:
+        enabled: {marketing_enabled}
+        target_roles: ["Marketing Manager"]
+        target_field: "digital marketing"
+        skills:
+          must_have_any: ["AEM", "HTML"]
+          nice_to_have: ["Marketo"]
+    preferences:
+      location: "Homewood, IL"
+      salary_min: 130000
+      experience_years: 15
+    maintenance:
+      stale_listing_max_age_days: 45
+""")
+
+
+def _write_profile(tmpdir: str, marketing_enabled: bool) -> Path:
+    path = Path(tmpdir) / f"profile_{marketing_enabled}.yaml"
+    path.write_text(LANES_YAML.format(marketing_enabled=str(marketing_enabled).lower()))
+    return path
+
+
+def test_search_lanes_config() -> None:
+    print("\n=== Search Lane Config ===")
+    from app.config import load_profile, load_settings
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        profile = load_profile(_write_profile(tmpdir, marketing_enabled=True))
+        check("Two lanes loaded", len(profile.search_lanes) == 2, str(list(profile.search_lanes)))
+        check("Lane name injected from key",
+              profile.search_lanes["marketing_manager"].name == "marketing_manager")
+        check("Both lanes enabled",
+              [l.name for l in profile.enabled_lanes] == ["frontend_developer", "marketing_manager"])
+        check("must_have_any parsed",
+              profile.search_lanes["marketing_manager"].skills.must_have_any == ["AEM", "HTML"])
+        check("must_have_any defaults empty",
+              profile.search_lanes["frontend_developer"].skills.must_have_any == [])
+        check("Maintenance config parsed", profile.maintenance.stale_listing_max_age_days == 45)
+        check("preserve_statuses default",
+              profile.maintenance.preserve_statuses == ["approved", "applied"])
+
+        profile = load_profile(_write_profile(tmpdir, marketing_enabled=False))
+        check("enabled_lanes respects enabled=false",
+              [l.name for l in profile.enabled_lanes] == ["frontend_developer"])
+
+    # The real config must load through the models too
+    settings = load_settings()
+    check("Real profile loads with lanes", len(settings.profile.enabled_lanes) >= 2)
+    indeed = settings.boards.boards.get("indeed")
+    check("Board without queries gets no profile default",
+          indeed is not None and indeed.search_queries == [])
+
+
+# =====================================================================
+# Lane-aware DB operations (uses app.database)
+# =====================================================================
+
+async def _lane_db_checks(db_path: Path) -> None:
+    from app.database import Database, EvaluationRecord, JobRecord
+
+    async with Database(db_path) as db:
+        url = "https://example.com/job/1"
+        job_id = await db.insert_job(JobRecord(
+            source="indeed", url=url, title="Web Marketing Manager",
+            search_lane="frontend_developer",
+        ))
+        job = await db.get_job(job_id)
+        check("insert_job stores search_lane", job.search_lane == "frontend_developer")
+
+        promoted = await db.add_lane_to_job(url, "frontend_developer")
+        job = await db.get_job(job_id)
+        check("Same lane is a no-op", not promoted and job.search_lane == "frontend_developer")
+
+        promoted = await db.add_lane_to_job(url, "marketing_manager")
+        job = await db.get_job(job_id)
+        check("Different lane promotes to 'both'", promoted and job.search_lane == "both")
+
+        promoted = await db.add_lane_to_job(url, "marketing_manager")
+        promoted_again = await db.add_lane_to_job(url, "frontend_developer")
+        job = await db.get_job(job_id)
+        check("add_lane_to_job is idempotent on 'both'",
+              not promoted and not promoted_again and job.search_lane == "both")
+
+        # Per-lane evaluations
+        await db.insert_evaluation(EvaluationRecord(
+            job_id=job_id, model_used="m", match_score=0.3, search_lane="frontend_developer"))
+        await db.insert_evaluation(EvaluationRecord(
+            job_id=job_id, model_used="m", match_score=0.8, search_lane="marketing_manager"))
+        fe = await db.get_evaluation(job_id, lane="frontend_developer")
+        mm = await db.get_evaluation(job_id, lane="marketing_manager")
+        check("get_evaluation filters by lane",
+              fe.match_score == 0.3 and mm.match_score == 0.8)
+
+        rows, total = await db.get_jobs_paginated(lane="marketing_manager")
+        check("'both' job appears in lane filter", total == 1 and rows[0]["id"] == job_id)
+        check("Joined eval is the best lane score, one row per job",
+              len(rows) == 1 and rows[0]["eval_score"] == 0.8
+              and rows[0]["eval_lane"] == "marketing_manager")
+
+        stats = await db.get_stats()
+        check("get_stats has by_lane", stats.get("by_lane") == {"both": 1}, str(stats))
+        check("get_stats total unaffected by by_lane", stats.get("total") == 1)
+
+
+async def _purge_checks(db_path: Path) -> None:
+    from app.database import Database, DecisionRecord, EvaluationRecord, JobRecord
+
+    async with Database(db_path) as db:
+        ids = {}
+        for title in ("new", "rejected", "approved", "applied", "fresh"):
+            ids[title] = await db.insert_job(JobRecord(
+                source="indeed", url=f"https://example.com/{title}", title=title,
+                status="new" if title == "fresh" else title,
+                search_lane="frontend_developer",
+            ))
+            await db.insert_evaluation(EvaluationRecord(
+                job_id=ids[title], model_used="m", match_score=0.5,
+                search_lane="frontend_developer"))
+
+        await db.insert_decision(DecisionRecord(job_id=ids["rejected"], decision="rejected"))
+
+        # Age everything except "fresh" past the cutoff
+        await db.conn.execute(
+            "UPDATE jobs SET date_scraped = datetime('now', '-40 days') WHERE id != ?",
+            (ids["fresh"],),
+        )
+        await db.conn.commit()
+
+        deleted = await db.purge_stale_listings(max_age_days=30)
+        check("Purge deleted old new + rejected jobs", deleted == 2, f"deleted={deleted}")
+
+        cursor = await db.conn.execute("SELECT title FROM jobs")
+        remaining = {r[0] for r in await cursor.fetchall()}
+        check("Purge preserved approved/applied/fresh",
+              remaining == {"approved", "applied", "fresh"}, str(remaining))
+
+        cursor = await db.conn.execute(
+            "SELECT COUNT(*) FROM evaluations WHERE job_id NOT IN (SELECT id FROM jobs)"
+        )
+        check("Purge removed related evaluations", (await cursor.fetchone())[0] == 0)
+
+        cursor = await db.conn.execute(
+            "SELECT COUNT(*) FROM decisions WHERE job_id NOT IN (SELECT id FROM jobs)"
+        )
+        check("Purge removed related decisions", (await cursor.fetchone())[0] == 0)
+
+        check("Purge with nothing stale returns 0",
+              await db.purge_stale_listings(max_age_days=30) == 0)
+
+
+LEGACY_SCHEMA = """
+CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,
+    external_id TEXT, url TEXT NOT NULL UNIQUE, title TEXT NOT NULL, company TEXT,
+    location TEXT, salary_min REAL, salary_max REAL, description TEXT, raw_html TEXT,
+    date_posted TEXT, date_scraped TEXT DEFAULT (datetime('now')),
+    status TEXT DEFAULT 'new');
+CREATE TABLE evaluations (id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id), model_used TEXT NOT NULL,
+    match_score REAL, reasoning TEXT, cover_letter_draft TEXT,
+    evaluated_at TEXT DEFAULT (datetime('now')));
+INSERT INTO jobs (source, url, title) VALUES ('indeed', 'https://old/1', 'Old Job');
+"""
+
+
+async def _migration_checks(db_path: Path) -> None:
+    """A pre-lanes DB (no search_lane columns) should migrate cleanly."""
+    from app.database import Database
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(LEGACY_SCHEMA)
+    conn.commit()
+    conn.close()
+
+    async with Database(db_path) as db:
+        job = await db.get_job(1)
+        check("Legacy job migrated to frontend_developer lane",
+              job.search_lane == "frontend_developer")
+        cursor = await db.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_jobs_lane'"
+        )
+        check("idx_jobs_lane created after migration", await cursor.fetchone() is not None)
+
+
+def test_lane_database() -> None:
+    print("\n=== Lane-aware Database ===")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        asyncio.run(_lane_db_checks(Path(tmpdir) / "lanes.db"))
+        asyncio.run(_purge_checks(Path(tmpdir) / "purge.db"))
+        asyncio.run(_migration_checks(Path(tmpdir) / "legacy.db"))
+
+
+# =====================================================================
+# Eval prompt per lane (uses app.evaluator.pipeline)
+# =====================================================================
+
+def test_eval_prompt_lanes() -> None:
+    print("\n=== Eval Prompt per Lane ===")
+    from app.config import load_profile
+    from app.database import JobRecord
+    from app.evaluator.pipeline import build_eval_prompt
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        profile = load_profile(_write_profile(tmpdir, marketing_enabled=True))
+
+    job = JobRecord(source="indeed", url="https://x", title="Marketing Manager",
+                    description="Own our AEM site")
+    gate = "Gate skills (job must list at least ONE, or cap at 0.35): "
+
+    mm_prompt = build_eval_prompt(profile, profile.search_lanes["marketing_manager"], job)
+    check("Marketing prompt renders gate skills", gate + "AEM, HTML" in mm_prompt)
+    check("Marketing prompt uses lane target_field",
+          "Target field: digital marketing" in mm_prompt)
+    check("Marketing prompt uses lane target roles",
+          "Target Roles: Marketing Manager" in mm_prompt)
+
+    fe_prompt = build_eval_prompt(profile, profile.search_lanes["frontend_developer"], job)
+    check("Frontend prompt renders 'None (no gate)'", gate + "None (no gate)" in fe_prompt)
+    check("Frontend prompt uses lane core skills", "Core skills: JavaScript, React" in fe_prompt)
+
+
+# =====================================================================
 # Run all tests
 # =====================================================================
 
@@ -376,6 +626,9 @@ if __name__ == "__main__":
     test_salary_parser()
     test_blacklist()
     test_html_parsing()
+    test_search_lanes_config()
+    test_lane_database()
+    test_eval_prompt_lanes()
 
     print("\n" + "=" * 50)
     print(f"Results: {PASS} passed, {FAIL} failed")

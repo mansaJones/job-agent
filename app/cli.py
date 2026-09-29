@@ -249,13 +249,14 @@ def evaluate(
                         return
 
                     console.print(f"Evaluating: [bold]{job.title}[/bold] at {job.company}")
-                    result = await pipeline.evaluate_job(job)
+                    results = await pipeline.evaluate_job(job)
 
-                    if result is None:
+                    if not results:
                         console.print("[red]Evaluation failed — check logs[/red]")
                         return
 
-                    _print_eval_result(job, result)
+                    for result in results:
+                        _print_eval_result(job, result)
                     return
 
                 # Batch mode
@@ -348,6 +349,7 @@ def list_jobs(
                     console.print(f"  [green]Salary:[/green]   {sal_min} – {sal_max}")
 
                 console.print(f"  [green]Status:[/green]   {job.status}")
+                console.print(f"  [green]Lane:[/green]     {job.search_lane or 'N/A'}")
                 console.print(f"  [green]Posted:[/green]   {job.date_posted or 'N/A'}")
                 console.print(f"  [green]Scraped:[/green]  {job.date_scraped or 'N/A'}")
                 console.print(f"  [green]URL:[/green]      {job.url}")
@@ -473,10 +475,18 @@ def status() -> None:
             table.add_column("Status", style="cyan")
             table.add_column("Count", justify="right", style="green")
 
+            by_lane = stats.pop("by_lane", {})
             for status_name, count in sorted(stats.items()):
                 table.add_row(status_name, str(count))
 
             console.print(table)
+
+            lane_table = Table(title="Jobs by Search Lane")
+            lane_table.add_column("Lane", style="cyan")
+            lane_table.add_column("Count", justify="right", style="green")
+            for lane_name, count in sorted(by_lane.items()):
+                lane_table.add_row(lane_name, str(count))
+            console.print(lane_table)
 
     asyncio.run(_run())
 
