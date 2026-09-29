@@ -9,12 +9,13 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -130,6 +131,25 @@ def _enabled_lane_names() -> list[str]:
     return [lane.name for lane in get_settings().profile.enabled_lanes]
 
 
+def _resume_lanes(job: dict) -> list[str]:
+    """Lanes a resume can be generated for: every enabled lane for 'both', else the job's lane."""
+    lanes = _enabled_lane_names()
+    if job.get("search_lane") == "both":
+        return lanes
+    if job.get("search_lane") in lanes:
+        return [job["search_lane"]]
+    return lanes[:1]
+
+
+def _resume_panel_ctx(job_id: int, lane: str, resume: Any, *, from_cache: bool,
+                      cost: str | None, model: str | None,
+                      generated_at: str | None = None) -> dict[str, Any]:
+    return {
+        "job_id": job_id, "lane": lane, "resume": resume, "from_cache": from_cache,
+        "cost": cost, "model": model, "generated_at": generated_at,
+    }
+
+
 # Register filters for Jinja2
 templates.env.filters["score_color"] = _score_color
 templates.env.filters["format_salary"] = lambda row: _format_salary(
@@ -156,7 +176,7 @@ async def index(request: Request):
         status="maybe", limit=5, sort_by="eval_score", sort_dir="DESC"
     )
 
-    return templates.TemplateResponse("index.html", {
+    return templates.TemplateResponse(request, "index.html", {
         "request": request,
         "stats": stats,
         "top_matches": top_matches,
@@ -203,9 +223,9 @@ async def jobs_page(
     # HTMX pagination swaps just the table; filter tabs swap the whole view
     # (full page + hx-select) so both tab rows re-render with the new filters.
     if request.headers.get("HX-Request") and request.headers.get("HX-Target") == "job-list":
-        return templates.TemplateResponse("partials/job_table.html", ctx)
+        return templates.TemplateResponse(request, "partials/job_table.html", ctx)
 
-    return templates.TemplateResponse("jobs.html", ctx)
+    return templates.TemplateResponse(request, "jobs.html", ctx)
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -223,10 +243,29 @@ async def job_detail_page(request: Request, job_id: int):
             evaluation = await db.get_evaluation(job_id, lane=lane_name)
             lane_evals.append({"lane": lane_name, "eval": evaluation})
 
-    return templates.TemplateResponse("job_detail.html", {
+    # Previously generated resumes render populated instead of the opt-in stub
+    from app.resume_generator.pipeline import DOC_TYPE, load_saved_resume
+
+    resume_lanes = _resume_lanes(job)
+    existing_resumes: dict[str, dict[str, Any]] = {}
+    for lane_name in resume_lanes:
+        doc = await db.get_generated_document(job_id, lane_name, DOC_TYPE)
+        if not doc:
+            continue
+        saved = load_saved_resume(Path(doc["file_path"]))
+        if saved is None:
+            continue
+        existing_resumes[lane_name] = _resume_panel_ctx(
+            job_id, lane_name, saved, from_cache=True, cost=None,
+            model=doc["model_used"], generated_at=doc["generated_at"],
+        )
+
+    return templates.TemplateResponse(request, "job_detail.html", {
         "request": request,
         "job": job,
         "lane_evals": lane_evals,
+        "resume_lanes": resume_lanes,
+        "existing_resumes": existing_resumes,
     })
 
 
@@ -320,7 +359,7 @@ async def api_decide(
         hx_target = request.headers.get("HX-Target", "")
         if hx_target == "decision-area":
             job_data = await db.get_job_with_evaluation(job_id)
-            return templates.TemplateResponse("partials/decision_badge.html", {
+            return templates.TemplateResponse(request, "partials/decision_badge.html", {
                 "request": request,
                 "job": job_data,
             })
@@ -396,7 +435,7 @@ async def api_polish(request: Request, job_id: int):
 
     if request.headers.get("HX-Request"):
         # Return the cover letter section for HTMX swap
-        return templates.TemplateResponse("partials/cover_letter.html", {
+        return templates.TemplateResponse(request, "partials/cover_letter.html", {
             "request": request,
             "cover_letter": result.cover_letter,
             "cost": result.cost_display,
@@ -409,6 +448,116 @@ async def api_polish(request: Request, job_id: int):
         "cost": result.cost_display,
         "model": result.model_used,
     }
+
+
+def _resume_error(request: Request, message: str, status_code: int = 400):
+    # HTMX won't swap 4xx responses by default, so badges go back as 200 (like /polish)
+    if request.headers.get("HX-Request"):
+        return HTMLResponse(f'<span class="badge badge-red">{message}</span>')
+    raise HTTPException(status_code=status_code, detail=message)
+
+
+@app.post("/api/jobs/{job_id}/generate-resume")
+async def api_generate_resume(
+    request: Request,
+    job_id: int,
+    lane: str | None = Form(None),
+    force: str | None = Form(None),
+):
+    """Generate (or serve cached) a job-tailored resume for one lane.
+
+    Accepts form-encoded (HTMX hx-vals) or JSON: {"lane": "...", "force": true}.
+    """
+    settings = get_settings()
+    db = get_db()
+
+    force_flag = str(force).lower() in ("true", "1", "yes", "on") if force is not None else False
+    if lane is None:
+        try:
+            body = await request.json()
+            lane = body.get("lane")
+            force_flag = bool(body.get("force", False))
+        except Exception:
+            lane = None
+    if not lane:
+        return _resume_error(request, "No lane provided")
+
+    if not settings.secrets.anthropic_api_key:
+        return _resume_error(request, "API key not configured")
+
+    from app.resume_generator.linkedin_parser import DEFAULT_DATA_PATH
+
+    if not DEFAULT_DATA_PATH.exists():
+        return _resume_error(request, "Run `job-agent parse-linkedin` first")
+
+    from app.polisher.claude_client import ClaudeClient
+    from app.resume_generator.pipeline import JobNotFoundError, ResumePipeline
+
+    try:
+        async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
+            pipeline = ResumePipeline(db, claude, settings)
+            result = await pipeline.generate_for_job(job_id, lane, force=force_flag)
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError as e:
+        return _resume_error(request, str(e))
+    except Exception as e:
+        logger.error("Resume generation failed for job #%d [%s]: %s", job_id, lane, e,
+                     exc_info=True)
+        return _resume_error(request, f"Error: {e}", status_code=500)
+
+    gen = result.gen_result
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/resume_panel.html", {
+            "request": request,
+            **_resume_panel_ctx(
+                job_id, lane, result.resume, from_cache=result.from_cache,
+                cost=gen.cost_display if gen else None,
+                model=gen.model_used if gen else None,
+            ),
+        })
+
+    return {
+        "status": "ok",
+        "resume": result.resume.model_dump(),
+        "pdf_path": str(result.pdf_path),
+        "docx_path": str(result.docx_path),
+        "from_cache": result.from_cache,
+        "cost": gen.cost_display if gen else None,
+        "model": gen.model_used if gen else None,
+    }
+
+
+@app.get("/api/jobs/{job_id}/resume/{lane}/download")
+async def api_download_resume(job_id: int, lane: str, fmt: str = Query("pdf")):
+    """Download a generated resume as PDF or DOCX."""
+    if fmt not in ("pdf", "docx"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf or docx")
+
+    from app.resume_generator.linkedin_parser import load_linkedin_data
+    from app.resume_generator.pipeline import DOC_TYPE
+
+    db = get_db()
+    doc = await db.get_generated_document(job_id, lane, DOC_TYPE)
+    if not doc:
+        raise HTTPException(status_code=404, detail="No resume generated for this job/lane")
+    path = Path(doc["file_path"]).with_suffix(f".{fmt}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Resume file missing — regenerate it")
+
+    job = await db.get_job(job_id)
+    company_slug = re.sub(r"[^A-Za-z0-9]+", "_", (job.company if job else "") or "").strip("_")
+    try:
+        last_name = load_linkedin_data().last_name or "resume"
+    except FileNotFoundError:
+        last_name = "resume"
+    filename = f"{last_name}_{company_slug or 'job'}_resume.{fmt}"
+
+    media_type = (
+        "application/pdf" if fmt == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @app.get("/api/tasks/status")

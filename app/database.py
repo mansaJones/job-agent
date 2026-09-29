@@ -477,6 +477,55 @@ class Database:
         return cursor.lastrowid  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
+    # Generated documents CRUD
+    # ------------------------------------------------------------------
+
+    async def insert_generated_document(
+        self,
+        job_id: int,
+        search_lane: str,
+        doc_type: str,
+        file_path: str,
+        model_used: str | None,
+        content_hash: str | None,
+    ) -> int:
+        """Record a generated document (resume, cover letter) for a job + lane."""
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO generated_documents (job_id, search_lane, doc_type, file_path,
+                                             model_used, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (job_id, search_lane, doc_type, file_path, model_used, content_hash),
+        )
+        await self.conn.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+
+    async def get_generated_document(
+        self, job_id: int, search_lane: str, doc_type: str
+    ) -> dict | None:
+        """Latest generated document for a job + lane + type."""
+        cursor = await self.conn.execute(
+            "SELECT * FROM generated_documents "
+            "WHERE job_id = ? AND search_lane = ? AND doc_type = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (job_id, search_lane, doc_type),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def delete_generated_document(
+        self, job_id: int, search_lane: str, doc_type: str
+    ) -> None:
+        """Delete generated document rows for a job + lane + type (files are left alone)."""
+        await self.conn.execute(
+            "DELETE FROM generated_documents "
+            "WHERE job_id = ? AND search_lane = ? AND doc_type = ?",
+            (job_id, search_lane, doc_type),
+        )
+        await self.conn.commit()
+
+    # ------------------------------------------------------------------
     # Stats
     # ------------------------------------------------------------------
 

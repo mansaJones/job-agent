@@ -643,6 +643,116 @@ def polish(
 
 
 # ------------------------------------------------------------------
+# parse-linkedin command
+# ------------------------------------------------------------------
+
+@app.command("parse-linkedin")
+def parse_linkedin(
+    zip_path: Optional[str] = typer.Option(
+        None, "--zip", help="LinkedIn export ZIP. Default: resumes/linkedin_export.zip",
+    ),
+) -> None:
+    """Parse your LinkedIn data export into resumes/linkedin_data.json."""
+    from pathlib import Path as P
+    from app.resume_generator.linkedin_parser import (
+        DEFAULT_DATA_PATH, DEFAULT_EXPORT_PATH, parse_linkedin_export,
+    )
+
+    settings = _get_settings()
+    path = P(zip_path) if zip_path else DEFAULT_EXPORT_PATH
+    if not path.exists():
+        console.print(
+            f"[red]{path} not found.[/red]\n"
+            "Download your data from LinkedIn → Settings & Privacy → Data privacy → "
+            "Get a copy of your data, then save the ZIP there."
+        )
+        raise typer.Exit(1)
+
+    data = parse_linkedin_export(path, contact=settings.profile.contact)
+
+    starts = [p.start_date for p in data.positions if p.start_date]
+    ends = [p.end_date or "present" for p in data.positions]
+    date_range = f"{min(starts)} → {max(ends)}" if starts else "unknown"
+
+    table = Table(title=f"LinkedIn Export — {data.full_name}")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Positions", str(len(data.positions)))
+    table.add_row("Skills", str(len(data.skills)))
+    table.add_row("Education", str(len(data.education)))
+    table.add_row("Certifications", str(len(data.certifications)))
+    table.add_row("Date range", date_range)
+    table.add_row("Saved to", str(DEFAULT_DATA_PATH))
+    console.print(table)
+
+    if data.parse_warnings:
+        console.print("\n[yellow]Warnings:[/yellow]")
+        for w in data.parse_warnings:
+            console.print(f"  [yellow]•[/yellow] {w}")
+
+
+# ------------------------------------------------------------------
+# resume command
+# ------------------------------------------------------------------
+
+@app.command()
+def resume(
+    job_id: int = typer.Argument(..., help="Job ID to tailor a resume for."),
+    lane: str = typer.Option(..., "--lane", "-l", help="Search lane, e.g. frontend_developer."),
+    force: bool = typer.Option(False, "--force", help="Regenerate even if cached."),
+) -> None:
+    """Generate a job-tailored resume (PDF + DOCX) using Claude API."""
+    settings = _get_settings()
+
+    if not settings.secrets.anthropic_api_key:
+        console.print(
+            "[red]Anthropic API key not configured.[/red]\n"
+            "Add ANTHROPIC_API_KEY to config/secrets.env"
+        )
+        raise typer.Exit(1)
+
+    async def _run() -> None:
+        from app.polisher.claude_client import ClaudeClient
+        from app.resume_generator.pipeline import JobNotFoundError, ResumePipeline
+
+        async with Database(settings.db_path) as db:
+            async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
+                pipeline = ResumePipeline(db, claude, settings)
+                try:
+                    result = await pipeline.generate_for_job(job_id, lane, force=force)
+                except (JobNotFoundError, ValueError, FileNotFoundError) as e:
+                    console.print(f"[red]{e}[/red]")
+                    raise typer.Exit(1)
+
+        r = result.resume
+        console.print(f"\n[bold green]Resume ready[/bold green] — {r.headline}")
+
+        if r.matched_requirements:
+            console.print("\n[green]Matched requirements:[/green]")
+            for req in r.matched_requirements:
+                console.print(f"  [green]✓[/green] {req}")
+        if r.unmatched_requirements:
+            console.print("\n[yellow]Unmatched requirements:[/yellow]")
+            for req in r.unmatched_requirements:
+                console.print(f"  [yellow]–[/yellow] {req}")
+        if r.fabrication_warnings:
+            console.print("\n[red]Fabrication warnings (removed from resume):[/red]")
+            for w in r.fabrication_warnings:
+                console.print(f"  [red]![/red] {w}")
+
+        if result.from_cache:
+            console.print("\n[dim]Served from cache — use --force to regenerate.[/dim]")
+        elif result.gen_result:
+            g = result.gen_result
+            console.print(f"\n[dim]Model: {g.model_used} | "
+                          f"Tokens: {g.input_tokens} in / {g.output_tokens} out | "
+                          f"Cost: {g.cost_display}[/dim]")
+        console.print(f"\n  PDF:  {result.pdf_path}\n  DOCX: {result.docx_path}")
+
+    asyncio.run(_run())
+
+
+# ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
 

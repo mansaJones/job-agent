@@ -33,3 +33,11 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Personal data — LinkedIn export, parsed work history/contact info, generated resumes
+resumes/linkedin_export.zip
+resumes/linkedin_data.json
+data/generated_resumes/
+
+# Stray duplicate of resumes/jljones LEAD DEV RESUME.pdf
+/jljones LEAD DEV RESUME.pdf

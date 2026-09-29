@@ -194,6 +194,9 @@ boards:
 | `job-agent notify --digest` | Send the daily digest to Telegram |
 | `job-agent polish --id 5` | Generate a cover letter for job #5 |
 | `job-agent polish --id 5 --resume ~/agent/resumes/resume.pdf` | Use a specific resume |
+| `job-agent parse-linkedin` | Parse `resumes/linkedin_export.zip` into `resumes/linkedin_data.json` |
+| `job-agent resume 5 --lane marketing_manager` | Generate a tailored resume (PDF + DOCX) for job #5 |
+| `job-agent resume 5 --lane marketing_manager --force` | Regenerate, ignoring the cache |
 | `job-agent status` | Database stats by status |
 
 ## Evaluation Scoring
@@ -239,6 +242,59 @@ job-agent polish --id 5
 Or from the dashboard: open any job detail page and click "I want a cover letter for this one" to opt in, then "Generate Cover Letter". Cover letter generation is opt-in per job — it won't clutter the detail page unless you ask for it. Once generated, the letter is saved to the database and shown on the detail page with copy and regenerate buttons.
 
 The polisher automatically picks a template (leadership vs senior IC) based on the job title, sends your resume + the job description to Claude Sonnet, and gets back a tailored 3-4 paragraph letter. Cost is roughly $0.03 per letter.
+
+## Tailored Resumes
+
+Generates a resume for a specific job and lane from your LinkedIn data, using Claude API. Every claim is checked against your own data. Skills or positions Claude can't back up are removed and listed as fabrication warnings.
+
+### 1. Export your LinkedIn data
+
+LinkedIn → Settings & Privacy → Data privacy → **Get a copy of your data**. Select at least Profile, Positions, Skills, Education, and Certifications. LinkedIn emails you a ZIP, anywhere from 10 minutes to a few hours later. Save it as `resumes/linkedin_export.zip`, then run:
+
+```bash
+job-agent parse-linkedin              # or: --zip path/to/export.zip
+```
+
+This writes `resumes/linkedin_data.json`. Re-run it whenever you update your LinkedIn profile. The ZIP, the parsed JSON, and `data/generated_resumes/` are all gitignored, because they contain your full work history and contact info.
+
+### 2. Contact details (`config/profile.yaml`)
+
+```yaml
+contact:
+  email: ""          # blank = use the primary email from the LinkedIn export
+  phone: ""          # blank = use the phone from the LinkedIn export
+  linkedin_url: ""   # not in the export — set it here
+  portfolio_url: "https://mansa-tech.com/portfolio/"
+```
+
+### 3. Extra achievements (`resumes/additional_bullets.json`)
+
+For metrics and projects that aren't on LinkedIn. Keys are company names exactly as they appear in your LinkedIn positions; matching is case-insensitive. Keys starting with `_` are ignored.
+
+```json
+{
+  "Amazon Web Services (AWS)": [
+    {"text": "Built AEM component library adopted across 12 product pages, cutting page build time 40%",
+     "tags": ["AEM", "HTML", "JavaScript", "marketing"]}
+  ]
+}
+```
+
+These bullets are appended to the matching position before generation. Their `tags` count as evidence in the fabrication check, so only add real achievements.
+
+### 4. Generate
+
+```bash
+job-agent resume 42 --lane marketing_manager
+```
+
+You can also generate from the dashboard: on a job page, click **Generate resume for this one**. A job tagged `both` offers one resume per lane. Output goes to `data/generated_resumes/{job_id}_{lane}_resume.pdf` / `.docx` / `.json`. A repeat request with the same job description, lane, and LinkedIn data is served from cache at no cost. Use `--force` or **Regenerate** to create a new one.
+
+The resumes are ATS-friendly:
+- Single column with no tables.
+- Standard section order: Summary, Skills, Experience, Education, Certifications.
+- Dates right-aligned on the same line as company and title.
+- Real `•` bullets, Letter size with 0.75" margins.
 
 ## Adaptive Scraper Health
 

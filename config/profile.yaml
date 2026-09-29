@@ -79,6 +79,14 @@ blacklist:
     - "junior"
     - "entry level"
 
+# Contact details for generated resumes. Email/phone fall back to the LinkedIn
+# export if left blank; linkedin_url is not in the export, so set it here.
+contact:
+  email: ""
+  phone: ""
+  linkedin_url: ""
+  portfolio_url: "https://mansa-tech.com/portfolio/"
+
 maintenance:
   stale_listing_max_age_days: 30
   preserve_statuses:

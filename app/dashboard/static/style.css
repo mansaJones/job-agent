@@ -219,6 +219,21 @@ tbody td {
 /* Lane filter row sits above status tabs — slightly quieter */
 .lane-tabs .filter-tab { font-size: 0.8rem; padding: 0.3rem 0.85rem; }
 
+/* Resume panel */
+.resume-badges { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.resume-badges .badge { text-transform: none; }
+.fabrication-callout {
+    margin-top: 0.75rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--red);
+    border-radius: 6px;
+    background: var(--red-bg);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+.fabrication-callout strong { color: var(--red); }
+.fabrication-callout ul { margin: 0.35rem 0 0 1.1rem; }
+
 /* Side-by-side lane evaluations on job detail */
 .lane-eval-grid {
     display: grid;

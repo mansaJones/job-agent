@@ -7,7 +7,6 @@ configurable thresholds.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -16,6 +15,7 @@ from datetime import datetime, timezone
 from app.config import ProfileConfig, SearchLaneConfig
 from app.database import Database, EvaluationRecord, JobRecord
 from app.evaluator.ollama_client import OllamaClient, OllamaError
+from app.utils.json_extract import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -194,22 +194,9 @@ def parse_eval_response(raw: str) -> EvalResult:
     Handles common LLM quirks: markdown fences, trailing commas, extra text
     around the JSON, etc.
     """
-    # Strip markdown code fences if present
-    cleaned = raw.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-
-    # Try to find JSON object in the response
-    json_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", cleaned, re.DOTALL)
-    if json_match:
-        cleaned = json_match.group(0)
-
-    # Fix trailing commas (common LLM mistake)
-    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
-
     try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
+        data = extract_json_object(raw)
+    except ValueError as e:
         logger.warning("Failed to parse LLM JSON: %s\nRaw response: %s", e, raw[:500])
         # Fall back to regex extraction
         return _fallback_parse(raw)

@@ -33,6 +33,8 @@ CONFIG_DIR: Path = PROJECT_ROOT / "config"
 DATA_DIR: Path = PROJECT_ROOT / "data"
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
 HTML_SNAPSHOTS_DIR: Path = DATA_DIR / "html_snapshots"
+RESUMES_DIR: Path = PROJECT_ROOT / "resumes"
+GENERATED_RESUMES_DIR: Path = DATA_DIR / "generated_resumes"
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +79,15 @@ class BlacklistConfig(BaseModel):
         return [entry.lower().strip() for entry in v] if v else []
 
 
+class ContactConfig(BaseModel):
+    """Contact details for resumes — not all of these are in the LinkedIn export."""
+
+    email: str = ""
+    phone: str = ""
+    linkedin_url: str = ""
+    portfolio_url: str = ""
+
+
 class MaintenanceConfig(BaseModel):
     """Housekeeping settings — stale listing purge, etc."""
 
@@ -91,6 +102,7 @@ class ProfileConfig(BaseModel):
     preferences: PreferencesConfig = Field(default_factory=PreferencesConfig)
     blacklist: BlacklistConfig = Field(default_factory=BlacklistConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
+    contact: ContactConfig = Field(default_factory=ContactConfig)
 
     @property
     def enabled_lanes(self) -> list[SearchLaneConfig]:
@@ -244,7 +256,8 @@ def load_settings() -> AppSettings:
     _resolve_board_defaults(boards, profile)
 
     # Ensure critical directories exist
-    for directory in [DATA_DIR, LOGS_DIR, HTML_SNAPSHOTS_DIR, DATA_DIR / "backups"]:
+    for directory in [DATA_DIR, LOGS_DIR, HTML_SNAPSHOTS_DIR, DATA_DIR / "backups",
+                      GENERATED_RESUMES_DIR]:
         directory.mkdir(parents=True, exist_ok=True)
 
     return AppSettings(

@@ -77,6 +77,59 @@
             {% endif %}
         </div>
 
+        <!-- Resume section (opt-in per job, one panel per lane) -->
+        <div id="resume-area">
+            {% for lane_name in resume_lanes %}
+            <div id="resume-panel-{{ lane_name }}">
+                {% if existing_resumes.get(lane_name) %}
+                {% set ctx = existing_resumes[lane_name] %}
+                {% with job_id=ctx.job_id, lane=ctx.lane, resume=ctx.resume, from_cache=ctx.from_cache,
+                        cost=ctx.cost, model=ctx.model, generated_at=ctx.generated_at %}
+                {% include "partials/resume_panel.html" %}
+                {% endwith %}
+                {% endif %}
+            </div>
+            {% endfor %}
+
+            {% set missing_lanes = resume_lanes|reject("in", existing_resumes)|list %}
+            {% if missing_lanes %}
+            <div class="card" id="resume-opt-in">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="color: var(--text-muted); font-size: 0.9rem;">
+                        {% if existing_resumes %}Resume for other lane not generated{% else %}Resume not generated{% endif %}
+                    </span>
+                    <button class="btn btn-ghost btn-sm"
+                            onclick="document.getElementById('resume-opt-in').style.display='none'; document.getElementById('resume-generator').style.display='block';">
+                        Generate resume for this one
+                    </button>
+                </div>
+            </div>
+            <div class="card" id="resume-generator" style="display: none;">
+                <h2>Resume</h2>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                    Tailor your LinkedIn experience to this job using Claude API. Anything not backed by your data is removed and flagged.
+                </p>
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                    {% for lane_name in missing_lanes %}
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/jobs/{{ job.id }}/generate-resume"
+                            hx-vals='{"lane": "{{ lane_name }}"}'
+                            hx-target="#resume-panel-{{ lane_name }}"
+                            hx-swap="innerHTML"
+                            hx-indicator="#resume-gen-spinner">
+                        {{ lane_name|humanize_lane }} resume
+                    </button>
+                    {% endfor %}
+                    <button class="btn btn-ghost btn-sm"
+                            onclick="document.getElementById('resume-generator').style.display='none'; document.getElementById('resume-opt-in').style.display='block';">
+                        Never mind
+                    </button>
+                    <span id="resume-gen-spinner" class="htmx-indicator" style="color: var(--text-muted); font-size: 0.85rem;">Generating (up to a minute)...</span>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
         <!-- Cover Letter section (opt-in per job) -->
         <div id="cover-letter-area">
             {% if job.cover_letter %}

@@ -1,0 +1,13 @@
+{
+  "_readme": "Bullets keyed by company name (must match Positions.csv exactly; matching is case-insensitive). Tags help the generator match bullets to job requirements and count as evidence for the anti-fabrication check. Keys starting with _ are ignored. Only add real achievements - everything here is sent to Claude as your actual experience.",
+  "_example": {
+    "Amazon Web Services (AWS)": [
+      {"text": "Example: Built AEM component library adopted across 12 product pages, cutting page build time 40%", "tags": ["AEM", "HTML", "JavaScript", "marketing"]}
+    ],
+    "Juvare": [
+      {"text": "Example: Led React migration for the emergency-management dashboard used by 200+ agencies", "tags": ["React", "JavaScript", "leadership"]}
+    ]
+  },
+  "Amazon Web Services (AWS)": [],
+  "Juvare": []
+}
