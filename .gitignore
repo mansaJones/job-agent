@@ -42,3 +42,7 @@ data/generated_cover_letters/
 
 # Stray duplicate of resumes/jljones LEAD DEV RESUME.pdf
 /jljones LEAD DEV RESUME.pdf
+
+# Windows apply client
+apply_client/.env
+apply_client/tests/__snapshots__/

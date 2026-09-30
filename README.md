@@ -333,7 +333,7 @@ It's safe to re-run: a job + lane that already has a cover letter is skipped. Mi
 
 The Jetson keeps a queue of jobs you've approved for applying. A separate **Windows apply client** (phase 4b, `apply_client/`) polls the queue, opens each application in Chrome, and fills what it confidently can. It then **stops before submitting**: you review the form, click the site's own Submit button, and press **Done** in the client's overlay.
 
-> This half (4a) is the Jetson side only. The queue does nothing until the Windows client from phase 4b is installed and running.
+> The queue does nothing on its own — install and run the Windows client on your PC. Setup, run modes, and troubleshooting: [`apply_client/README.md`](apply_client/README.md).
 
 ### The client never:
 - clicks Submit, Send Application, or any other final-step control;
@@ -592,7 +592,7 @@ python tests/test_core.py
 - [x] **v2 phase 2** — LinkedIn parser + tailored resume generator
 - [x] **v2 phase 3** — Lane-aware, editable cover letters
 - [x] **v2 phase 4a** — Apply queue API, pre-flight checks, dashboard
-- [ ] **v2 phase 4b** — Windows Playwright apply client
+- [x] **v2 phase 4b** — Windows Playwright apply client (`apply_client/`)
 
 ## Dependencies
 

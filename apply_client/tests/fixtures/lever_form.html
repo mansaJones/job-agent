@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Lever fixture</title></head>
+<body>
+<!-- Minimal hand-written form following Lever's markup patterns. No real data. -->
+<form class="application-form" action="https://jobs.lever.co/acme/abc-123/apply" method="post"
+      onsubmit="window.__submitted = true; return false;">
+  <ul>
+    <li class="application-question resume">
+      <div class="application-label">Resume/CV <span class="required">✱</span></div>
+      <div class="application-field">
+        <input type="file" name="resume" id="resume-upload-input" style="opacity:0;position:absolute">
+      </div>
+    </li>
+    <li class="application-question">
+      <label><div class="application-label">Full name</div>
+        <div class="application-field"><input type="text" name="name" required></div></label>
+    </li>
+    <li class="application-question">
+      <label><div class="application-label">Email</div>
+        <div class="application-field"><input type="email" name="email" required></div></label>
+    </li>
+    <li class="application-question">
+      <label><div class="application-label">Phone</div>
+        <div class="application-field"><input type="text" name="phone"></div></label>
+    </li>
+    <li class="application-question">
+      <label><div class="application-label">Current company</div>
+        <div class="application-field"><input type="text" name="org"></div></label>
+    </li>
+    <li class="application-question">
+      <label><div class="application-label">LinkedIn URL</div>
+        <div class="application-field"><input type="text" name="urls[LinkedIn]"></div></label>
+    </li>
+    <li class="application-question">
+      <label><div class="application-label">Portfolio URL</div>
+        <div class="application-field"><input type="text" name="urls[Portfolio]"></div></label>
+    </li>
+  </ul>
+
+  <div class="application-question custom-question">
+    <div class="application-label">How did you hear about this job?</div>
+    <div class="application-field"><input type="text" name="cards[c1][field0]"></div>
+  </div>
+  <div class="application-question custom-question">
+    <div class="application-label">Are you authorized to work in the US?</div>
+    <ul class="application-field">
+      <li><label><input type="radio" name="cards[c1][field1]" value="Yes"><span>Yes</span></label></li>
+      <li><label><input type="radio" name="cards[c1][field1]" value="No"><span>No</span></label></li>
+    </ul>
+  </div>
+  <div class="application-question custom-question">
+    <div class="application-label">Anything else you'd like us to know?</div>
+    <div class="application-field"><textarea name="cards[c1][field2]"></textarea></div>
+  </div>
+
+  <div class="eeo-section">
+    <div class="application-question">
+      <div class="application-label">Gender</div>
+      <select name="eeo[gender]">
+        <option value="">Select ...</option><option>Male</option><option>Female</option>
+        <option>Decline to self-identify</option>
+      </select>
+    </div>
+    <div class="application-question">
+      <div class="application-label">Disability status</div>
+      <select name="eeo[disability]">
+        <option value="">Select ...</option><option>Yes, I have a disability</option>
+        <option>No, I don't have a disability</option>
+        <option>I don't wish to answer</option>
+      </select>
+    </div>
+  </div>
+
+  <button type="submit" class="template-btn-submit" onclick="window.__submitted = true;">
+    Submit application</button>
+</form>
+</body>
+</html>

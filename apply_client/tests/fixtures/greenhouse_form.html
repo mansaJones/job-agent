@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Greenhouse fixture</title></head>
+<body>
+<!-- Minimal hand-written form following Greenhouse's markup patterns. No real data. -->
+<form id="application_form" action="https://boards.greenhouse.io/acme/jobs/123" method="post"
+      onsubmit="window.__submitted = true; return false;">
+  <div id="main_fields">
+    <div class="field">
+      <label for="first_name">First Name <span class="asterisk">*</span></label>
+      <input type="text" id="first_name" name="job_application[first_name]" aria-required="true">
+    </div>
+    <div class="field">
+      <label for="last_name">Last Name <span class="asterisk">*</span></label>
+      <input type="text" id="last_name" name="job_application[last_name]" aria-required="true">
+    </div>
+    <div class="field">
+      <label for="email">Email <span class="asterisk">*</span></label>
+      <input type="text" id="email" name="job_application[email]" aria-required="true">
+    </div>
+    <div class="field">
+      <label for="phone">Phone</label>
+      <input type="text" id="phone" name="job_application[phone]">
+    </div>
+    <div class="field">
+      <label for="job_application_location">Location (City)</label>
+      <input type="text" id="job_application_location" name="job_application[location]"
+             role="combobox" aria-autocomplete="list" autocomplete="off">
+      <ul id="location_results" role="listbox" style="display:none"></ul>
+    </div>
+    <div class="field" id="resume_fieldset">
+      <label>Resume/CV <span class="asterisk">*</span></label>
+      <button type="button" data-source="attach">Attach</button>
+      <input type="file" id="resume" name="resume" style="display:none">
+    </div>
+    <div class="field" id="cover_letter_fieldset">
+      <label>Cover Letter</label>
+      <button type="button" data-source="attach">Attach</button>
+      <input type="file" id="cover_letter" name="cover_letter" style="display:none">
+    </div>
+  </div>
+
+  <div id="custom_fields">
+    <div class="field">
+      <label for="q_linkedin">LinkedIn Profile</label>
+      <input type="text" id="q_linkedin" name="job_application[answers_attributes][0][text_value]">
+    </div>
+    <div class="field">
+      <label for="q_auth">Are you legally authorized to work in the United States?</label>
+      <select id="q_auth" name="job_application[answers_attributes][1][boolean_value]">
+        <option value="">--</option><option value="1">Yes</option><option value="0">No</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="q_sponsor">Will you now or in the future require visa sponsorship?</label>
+      <select id="q_sponsor" name="job_application[answers_attributes][2][boolean_value]">
+        <option value="">Select...</option><option value="1">Yes</option><option value="0">No</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="q_why">Why do you want to work at Acme?</label>
+      <textarea id="q_why" name="job_application[answers_attributes][3][text_value]"></textarea>
+    </div>
+    <div class="field">
+      <label for="q_salary">Desired salary</label>
+      <input type="text" id="q_salary" name="job_application[answers_attributes][4][text_value]">
+    </div>
+    <div class="field">
+      <label><input type="checkbox" id="q_certify" name="job_application[answers_attributes][5][boolean_value]">
+        I certify that the information above is accurate</label>
+    </div>
+  </div>
+
+  <div id="eeoc_fields">
+    <div class="field">
+      <label for="gender">Gender</label>
+      <select id="gender" name="job_application[gender]">
+        <option value="">Please select</option><option value="1">Male</option>
+        <option value="2">Female</option><option value="3">Decline To Self Identify</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="race">Race</label>
+      <select id="race" name="job_application[race]">
+        <option value="">Please select</option><option value="1">Asian</option>
+        <option value="2">Black or African American</option>
+        <option value="3">I don't wish to answer</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="veteran_status">Veteran Status</label>
+      <select id="veteran_status" name="job_application[veteran_status]">
+        <option value="">Please select</option><option value="1">I am a veteran</option>
+        <option value="2">I am not a veteran</option>
+      </select>
+    </div>
+  </div>
+
+  <input type="submit" id="submit_app" value="Submit Application"
+         onclick="window.__submitted = true;">
+</form>
+
+<script>
+  // Tiny location autocomplete, like Greenhouse's
+  const input = document.getElementById("job_application_location");
+  const list = document.getElementById("location_results");
+  input.addEventListener("input", () => {
+    const places = ["Homewood, Illinois, United States", "Homewood, Alabama, United States"];
+    list.innerHTML = places
+      .filter(p => p.toLowerCase().startsWith(input.value.split(",")[0].toLowerCase()))
+      .map(p => `<li role="option">${p}</li>`).join("");
+    list.style.display = list.children.length ? "block" : "none";
+  });
+  list.addEventListener("click", (e) => {
+    if (e.target.getAttribute("role") === "option") {
+      input.value = e.target.textContent;
+      list.style.display = "none";
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# Windows apply client — runs on your PC, NOT on the Jetson.
+# Install: pip install -r apply_client/requirements.txt && playwright install chrome
+playwright>=1.45
+httpx>=0.27
+pydantic>=2.5
+rich>=13.0
+python-dotenv>=1.0
