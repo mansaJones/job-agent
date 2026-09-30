@@ -84,7 +84,7 @@ blacklist:
 contact:
   email: ""
   phone: ""
-  linkedin_url: ""
+  linkedin_url: "https://www.linkedin.com/in/justen-jones/"
   portfolio_url: "https://mansa-tech.com/portfolio/"
 
 # Stock answers the apply client uses for common application questions.
