@@ -79,33 +79,44 @@ All shared config lives in `profile.yaml` — boards inherit from it automatical
 
 ### profile.yaml (single source of truth)
 
-```yaml
-target_roles:
-  - "Lead Frontend Developer"
-  - "Web Development Lead"
-  - "Front End Engineering Manager"
-  - "Senior Frontend Developer"
-  - "Development Manager"
+Roles and skills are organized into **search lanes** — independent role families that are scraped and scored separately. `preferences`, `blacklist`, and `maintenance` are shared across all lanes.
 
-skills:
-  must_have:       # LLM matches on ANY of these, not all
-    - "JavaScript"
-    - "React"
-    - "TypeScript"
-    - "HTML"
-    - "CSS"
-  nice_to_have:    # Bonus points
-    - "Node.js"
-    - "AEM"
-    - "Angular"
-    - "Python"
-    - "Azure"
-    - "CI/CD"
-    - "RESTful APIs"
-    - "SQL"
-    - "Git"
-    - "Redux"
-    - "Bootstrap"
+```yaml
+search_lanes:
+  frontend_developer:
+    enabled: true
+    target_roles:
+      - "Lead Frontend Developer"
+      - "Senior Frontend Developer"
+      - "Development Manager"
+    target_field: "software/web development, engineering management"
+    skills:
+      must_have:       # LLM matches on ANY of these, not all
+        - "JavaScript"
+        - "React"
+        - "TypeScript"
+      nice_to_have:    # Bonus points
+        - "Node.js"
+        - "AEM"
+    resume_version: "frontend_developer"
+
+  marketing_manager:
+    enabled: true
+    target_roles:
+      - "Marketing Manager"
+      - "Digital Marketing Manager"
+      - "Marketing Technology Manager"
+    target_field: "digital marketing, marketing technology, web marketing operations"
+    skills:
+      must_have_any:   # Gate: job must list at least ONE of these, or score caps at 0.35
+        - "AEM"
+        - "Adobe Experience Manager"
+        - "HTML"
+        - "JavaScript"
+      nice_to_have:
+        - "Marketo"
+        - "Adobe Analytics"
+    resume_version: "marketing_manager"
 
 preferences:
   location: "Homewood, IL"
@@ -125,11 +136,24 @@ blacklist:
     - "clearance required"
     - "junior"
     - "entry level"
+
+maintenance:
+  stale_listing_max_age_days: 30   # purge listings scraped longer ago than this
+  preserve_statuses:               # ...unless they have one of these statuses
+    - "approved"
+    - "applied"
 ```
+
+#### How lanes work
+
+- **Scraping:** every scraper runs each enabled lane in turn, using that lane's `target_roles` (lowercased) as search queries. Each job is tagged with the lane that found it. If a second lane finds the same URL, the job is tagged `both`.
+- **Evaluation:** a job is scored against its own lane's roles, field, and skills. A `both` job is scored once per lane, and its status is set by the **highest** lane score.
+- **Dashboard:** the Jobs page has a lane filter row above the status tabs (a lane filter includes `both` jobs). Each job shows a lane badge, and `both` jobs show their per-lane evaluations side by side.
+- Set `enabled: false` to pause a lane without deleting it. Jobs scraped before lanes existed are migrated to `frontend_developer`.
 
 ### boards.yaml (board-specific overrides only)
 
-Boards inherit `location`, `search_queries`, and `radius_miles` from profile.yaml unless explicitly overridden.
+Boards inherit `location` and `radius_miles` from profile.yaml unless explicitly overridden. Search queries come from the search lanes (see above); a board that sets explicit `search_queries` (like `usajobs`, which uses federal job titles) runs those once per enabled lane instead.
 
 ```yaml
 boards:
@@ -168,8 +192,14 @@ boards:
 | `job-agent dashboard --port 3000` | Start on a custom port |
 | `job-agent notify --test` | Send a test message to Telegram |
 | `job-agent notify --digest` | Send the daily digest to Telegram |
-| `job-agent polish --id 5` | Generate a cover letter for job #5 |
-| `job-agent polish --id 5 --resume ~/agent/resumes/resume.pdf` | Use a specific resume |
+| `job-agent polish --id 5 --lane frontend_developer` | Generate a cover letter for job #5 (alias: `cover-letter`) |
+| `job-agent polish --id 5 --lane frontend_developer --force` | Regenerate, replacing a cached or edited letter |
+| `job-agent migrate-cover-letters` | One-time: make pre-v2 cover letter drafts editable |
+| `job-agent parse-linkedin` | Parse `resumes/linkedin_export.zip` into `resumes/linkedin_data.json` |
+| `job-agent resume 5 --lane marketing_manager` | Generate a tailored resume (PDF + DOCX) for job #5 |
+| `job-agent resume 5 --lane marketing_manager --force` | Regenerate, ignoring the cache |
+| `job-agent queue-apply 5 --lane frontend_developer` | Pre-flight + queue job #5 for the apply client (`--force` skips warnings) |
+| `job-agent apply-queue` | Show the apply queue |
 | `job-agent status` | Database stats by status |
 
 ## Evaluation Scoring
@@ -184,9 +214,62 @@ The local LLM scores each job from 0.0 to 1.0 against your profile:
 
 Scoring rules: matching ANY must-have skill is a positive signal (not all required). Missing salary info is treated as neutral. Only clearly irrelevant jobs score below 0.3.
 
-## Cover Letter Generation (Phase 4)
+## Tailored Resumes
 
-When you find a job worth applying to, generate a tailored cover letter using the Anthropic Claude API.
+Generates a resume for a specific job and lane from your LinkedIn data, using Claude API. Every claim is checked against your own data. Skills or positions Claude can't back up are removed and listed as fabrication warnings.
+
+### 1. Export your LinkedIn data
+
+LinkedIn → Settings & Privacy → Data privacy → **Get a copy of your data**. Select at least Profile, Positions, Skills, Education, and Certifications. LinkedIn emails you a ZIP, anywhere from 10 minutes to a few hours later. Save it as `resumes/linkedin_export.zip`, then run:
+
+```bash
+job-agent parse-linkedin              # or: --zip path/to/export.zip
+```
+
+This writes `resumes/linkedin_data.json`. Re-run it whenever you update your LinkedIn profile. The ZIP, the parsed JSON, and `data/generated_resumes/` are all gitignored, because they contain your full work history and contact info.
+
+### 2. Contact details (`config/profile.yaml`)
+
+```yaml
+contact:
+  email: ""          # blank = use the primary email from the LinkedIn export
+  phone: ""          # blank = use the phone from the LinkedIn export
+  linkedin_url: ""   # not in the export — set it here
+  portfolio_url: "https://mansa-tech.com/portfolio/"
+```
+
+### 3. Extra achievements (`resumes/additional_bullets.json`)
+
+For metrics and projects that aren't on LinkedIn. Keys are company names exactly as they appear in your LinkedIn positions; matching is case-insensitive. Keys starting with `_` are ignored.
+
+```json
+{
+  "Amazon Web Services (AWS)": [
+    {"text": "Built AEM component library adopted across 12 product pages, cutting page build time 40%",
+     "tags": ["AEM", "HTML", "JavaScript", "marketing"]}
+  ]
+}
+```
+
+These bullets are appended to the matching position before generation. Their `tags` count as evidence in the fabrication check, so only add real achievements.
+
+### 4. Generate
+
+```bash
+job-agent resume 42 --lane marketing_manager
+```
+
+You can also generate from the dashboard: on a job page, click **Generate resume for this one**. A job tagged `both` offers one resume per lane. Output goes to `data/generated_resumes/{job_id}_{lane}_resume.pdf` / `.docx` / `.json`. A repeat request with the same job description, lane, and LinkedIn data is served from cache at no cost. Use `--force` or **Regenerate** to create a new one.
+
+The resumes are ATS-friendly:
+- Single column with no tables.
+- Standard section order: Summary, Skills, Experience, Education, Certifications.
+- Dates right-aligned on the same line as company and title.
+- Real `•` bullets, Letter size with 0.75" margins.
+
+## Cover Letters
+
+Cover letters are written for one job **and** one search lane, from the best candidate data available. Every letter is saved as an editable text file.
 
 ### Setup
 
@@ -197,24 +280,144 @@ When you find a job worth applying to, generate a tailored cover letter using th
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 ```
 
-3. Put your resume in the `resumes/` directory:
+3. Run `job-agent parse-linkedin` (see [Tailored Resumes](#tailored-resumes)).
+
+### Recommended order: resume first, then cover letter
 
 ```bash
-mkdir -p ~/agent/resumes
-# scp your resume from your PC
+job-agent resume 42 --lane marketing_manager
+job-agent cover-letter --id 42 --lane marketing_manager   # alias of `polish`
 ```
 
-### Usage
+The letter is written from the best candidate context it can find, in this order:
 
-From the CLI:
+1. **Tailored resume** for this job + lane (`data/generated_resumes/{id}_{lane}_resume.json`). The letter matches the resume you're sending.
+2. **LinkedIn data** (`resumes/linkedin_data.json` + `additional_bullets.json`). Works, but isn't aligned to this job's resume.
+3. **Static resume PDF** in `resumes/` whose filename contains the lane's `resume_version`.
+4. Nothing found → error pointing you at `job-agent parse-linkedin`.
+
+The CLI prints which source was used. The dashboard shows a yellow warning when a letter wasn't written from the tailored resume.
+
+### Template selection
+
+Templates in `templates/` give structure and tone guidance to Claude; they aren't fill-in-the-blank:
+
+| Lane | Job title | Template |
+|------|-----------|----------|
+| `marketing_manager` | any | `cover_letter_marketing.txt` |
+| `frontend_developer` | contains lead / manager / director / head / principal / vp | `cover_letter_frontend_lead.txt` |
+| `frontend_developer` | anything else | `cover_letter_frontend_ic.txt` |
+| any other lane | any | `cover_letter_general.txt` |
+
+### Editing
+
+On a job's detail page, the cover letter panel is an editable text box:
+- **Save edits** writes your text to `data/generated_cover_letters/{id}_{lane}_cover_letter.txt` and re-renders the PDF and DOCX.
+- Download the letter as PDF, DOCX, or TXT.
+
+Edited letters are marked `manual-edit` and are never overwritten by a normal generate. **Regenerate** asks for confirmation first. On the CLI, `--force` is required to replace an edited letter.
+
+A repeat request with the same job description, lane, and candidate context is served from cache at no cost. Cost is roughly $0.01–0.03 per letter.
+
+### Migrating old drafts
+
+Before v2, cover letters were stored in the database (`evaluations.cover_letter_draft`). Those still show on the job page as a read-only "legacy draft". Run this once to turn them into editable files:
 
 ```bash
-job-agent polish --id 5
+job-agent migrate-cover-letters
 ```
 
-Or from the dashboard: open any job detail page and click "I want a cover letter for this one" to opt in, then "Generate Cover Letter". Cover letter generation is opt-in per job — it won't clutter the detail page unless you ask for it. Once generated, the letter is saved to the database and shown on the detail page with copy and regenerate buttons.
+It's safe to re-run: a job + lane that already has a cover letter is skipped. Migrated drafts are kept like manual edits until you regenerate them.
 
-The polisher automatically picks a template (leadership vs senior IC) based on the job title, sends your resume + the job description to Claude Sonnet, and gets back a tailored 3-4 paragraph letter. Cost is roughly $0.03 per letter.
+## Assisted Apply (Apply Queue)
+
+The Jetson keeps a queue of jobs you've approved for applying. A separate **Windows apply client** (phase 4b, `apply_client/`) polls the queue, opens each application in Chrome, and fills what it confidently can. It then **stops before submitting**: you review the form, click the site's own Submit button, and press **Done** in the client's overlay.
+
+> This half (4a) is the Jetson side only. The queue does nothing until the Windows client from phase 4b is installed and running.
+
+### The client never:
+- clicks Submit, Send Application, or any other final-step control;
+- fills SSN, date of birth, government IDs, payment details, e-signatures, or consent/attestation fields;
+- answers EEO or demographic questions. It picks "decline to self-identify" if that option exists, otherwise it leaves them for you;
+- types passwords or solves CAPTCHAs. It hands off to you instead.
+
+### Setup
+
+1. Generate a shared secret:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+2. Put it in `config/secrets.env` as `APPLY_CLIENT_TOKEN=...` (see `config/secrets.env.example`). Use the same value in the Windows client's `apply_client/.env`. Until it's set, the `/api/apply-queue/*` routes return 503.
+3. Set `contact.email`, `contact.phone`, and `contact.linkedin_url` in `config/profile.yaml`. Pre-flight blocks queueing until all three are filled in.
+4. Review the stock answers the client uses for common questions:
+
+```yaml
+application_answers:
+  work_authorization: "Yes, I am authorized to work in the United States"
+  sponsorship_needed: "No"
+  start_availability: "Two weeks notice"
+  willing_to_relocate: "No"
+  remote_preference: "Remote or hybrid preferred"
+  salary_expectation: ""            # leave blank to skip; filled = medium confidence
+  referral_source: "Job board"
+  previously_applied: "No"
+  currently_employed: "Yes"
+  ok_to_contact_employer: "No"
+```
+
+A blank answer means the client leaves that question for you. There is deliberately no config for EEO/demographic answers.
+
+### Queueing a job
+
+Recommended order for each job: **resume → cover letter (review + Save edits) → Check & queue for apply**.
+
+On a job page, **Check & queue for apply** runs a pre-flight checklist:
+
+| Check | If it fails |
+|-------|-------------|
+| `APPLY_CLIENT_TOKEN` configured | ❌ blocks |
+| Tailored resume exists for this lane | ❌ blocks |
+| Cover letter exists for this lane | ❌ blocks |
+| Applicant data complete (email, phone, LinkedIn URL) | ❌ blocks |
+| Job not already applied or queued | ❌ blocks |
+| Resume has no fabrication warnings | ⚠️ warning |
+| Cover letter reviewed (saved with edits) | ⚠️ warning |
+
+If only warnings remain, you can click **Queue anyway**. The CLI equivalent:
+
+```bash
+job-agent queue-apply 42 --lane marketing_manager           # stops on warnings
+job-agent queue-apply 42 --lane marketing_manager --force   # queues despite warnings
+job-agent apply-queue                                       # show the queue
+```
+
+The **Apply Queue** page (nav bar) lists every request and refreshes every 15 seconds while the client is working.
+
+### Lifecycle
+
+```
+            dashboard / CLI                 Windows apply client                     human
+ queue-apply ─────▶ pending ── claim ──▶ claimed ── progress ──▶ in_progress ── Done ──▶ completed
+                       ▲                     │                        │         Abandon ──▶ abandoned
+                       │                     └──────── error ─────────┴───────────────────▶ failed
+                       └─── stale claim reset (claimed/in_progress > 30 min) ───┘
+```
+
+- **completed:** also records the application in `applied` (method `assisted`), marks the job `applied`, and sends a Telegram message. Abandoned and failed requests send a Telegram warning.
+- **Stale claims:** if the client crashes or you walk away, the scheduler resets the request to `pending` after 30 minutes. It checks every 15 minutes, and there's also a **Reset stale** button on the Apply Queue page.
+
+### Client API (`X-Apply-Token` header required)
+
+| Route | Purpose |
+|-------|---------|
+| `GET /api/apply-queue/health` | `{ok, pending}` — cheap poll target |
+| `GET /api/apply-queue/pending` | Pending requests with job info, applicant data, document URLs |
+| `POST /api/apply-queue/{id}/claim` | Claim a request (409 if someone else got it) |
+| `GET /api/apply-queue/{id}/documents/{resume\|cover_letter}?fmt=pdf\|docx` | Download a document |
+| `POST /api/apply-queue/{id}/progress` | `{status: in_progress, ats_detected, apply_url, fields_filled, fields_flagged, notes}` |
+| `POST /api/apply-queue/{id}/result` | `{status: completed\|abandoned\|failed, notes}` |
 
 ## Adaptive Scraper Health
 
@@ -345,6 +548,8 @@ The built-in scheduler runs scraping and evaluation on autopilot:
 - Weekday scrapes every 6 hours
 - Nightly scrape + evaluate at 2:00 AM
 - Eval catch-up at 3:30 AM
+- Stale apply-claim reset every 15 minutes (see [Assisted Apply](#assisted-apply-apply-queue))
+- Stale listing purge at 4:00 AM: deletes jobs scraped more than `maintenance.stale_listing_max_age_days` ago, unless their status is in `preserve_statuses` (default: approved, applied). Their evaluations, decisions, and applied records are deleted too. If a single run purges more than 100 jobs, you get a Telegram alert, since that usually means a config mistake.
 
 Start with: `job-agent run-scheduler` (or set up as a systemd service)
 
@@ -383,6 +588,11 @@ python tests/test_core.py
   - [ ] systemd service files
   - [ ] Daily DB backup cron
 - [ ] **Phase 6** — Analytics, outcome tracking, continuous improvement
+- [x] **v2 phase 1** — Dual search lanes + stale listing auto-purge
+- [x] **v2 phase 2** — LinkedIn parser + tailored resume generator
+- [x] **v2 phase 3** — Lane-aware, editable cover letters
+- [x] **v2 phase 4a** — Apply queue API, pre-flight checks, dashboard
+- [ ] **v2 phase 4b** — Windows Playwright apply client
 
 ## Dependencies
 

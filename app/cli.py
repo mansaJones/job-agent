@@ -249,13 +249,14 @@ def evaluate(
                         return
 
                     console.print(f"Evaluating: [bold]{job.title}[/bold] at {job.company}")
-                    result = await pipeline.evaluate_job(job)
+                    results = await pipeline.evaluate_job(job)
 
-                    if result is None:
+                    if not results:
                         console.print("[red]Evaluation failed — check logs[/red]")
                         return
 
-                    _print_eval_result(job, result)
+                    for result in results:
+                        _print_eval_result(job, result)
                     return
 
                 # Batch mode
@@ -348,6 +349,7 @@ def list_jobs(
                     console.print(f"  [green]Salary:[/green]   {sal_min} – {sal_max}")
 
                 console.print(f"  [green]Status:[/green]   {job.status}")
+                console.print(f"  [green]Lane:[/green]     {job.search_lane or 'N/A'}")
                 console.print(f"  [green]Posted:[/green]   {job.date_posted or 'N/A'}")
                 console.print(f"  [green]Scraped:[/green]  {job.date_scraped or 'N/A'}")
                 console.print(f"  [green]URL:[/green]      {job.url}")
@@ -473,10 +475,18 @@ def status() -> None:
             table.add_column("Status", style="cyan")
             table.add_column("Count", justify="right", style="green")
 
+            by_lane = stats.pop("by_lane", {})
             for status_name, count in sorted(stats.items()):
                 table.add_row(status_name, str(count))
 
             console.print(table)
+
+            lane_table = Table(title="Jobs by Search Lane")
+            lane_table.add_column("Lane", style="cyan")
+            lane_table.add_column("Count", justify="right", style="green")
+            for lane_name, count in sorted(by_lane.items()):
+                lane_table.add_row(lane_name, str(count))
+            console.print(lane_table)
 
     asyncio.run(_run())
 
@@ -573,20 +583,27 @@ def notify(
 
 
 # ------------------------------------------------------------------
-# polish command
+# polish / cover-letter commands
 # ------------------------------------------------------------------
+
+_CONTEXT_LABELS = {
+    "tailored_resume": "[green]tailored resume[/green]",
+    "linkedin_data": "[yellow]LinkedIn data only — run `job-agent resume` first for better alignment[/yellow]",
+    "static_pdf": "[yellow]static resume PDF — run `job-agent parse-linkedin` + `job-agent resume` for better alignment[/yellow]",
+}
+
 
 @app.command()
 def polish(
     job_id: int = typer.Option(
         ..., "--id", help="Job ID to generate a cover letter for.",
     ),
-    resume: Optional[str] = typer.Option(
-        None, "--resume", "-r",
-        help="Path to resume file (PDF/TXT). Default: auto-detect from resumes/.",
+    lane: str = typer.Option(..., "--lane", "-l", help="Search lane, e.g. frontend_developer."),
+    force: bool = typer.Option(
+        False, "--force", help="Regenerate even if cached or manually edited.",
     ),
 ) -> None:
-    """Generate a tailored cover letter for a job using Claude API."""
+    """Generate a lane-aware cover letter for a job using Claude API."""
     settings = _get_settings()
 
     if not settings.secrets.anthropic_api_key:
@@ -597,37 +614,261 @@ def polish(
         raise typer.Exit(1)
 
     async def _run() -> None:
-        from pathlib import Path as P
         from app.polisher.claude_client import ClaudeClient
         from app.polisher.pipeline import PolishPipeline
-
-        resume_path = P(resume) if resume else None
+        from app.resume_generator.pipeline import JobNotFoundError
 
         async with Database(settings.db_path) as db:
-            # Verify job exists
             job = await db.get_job(job_id)
             if not job:
                 console.print(f"[red]No job with ID {job_id}[/red]")
-                return
+                raise typer.Exit(1)
 
             console.print(f"[bold cyan]Generating cover letter for:[/bold cyan]")
-            console.print(f"  {job.title} @ {job.company or 'Unknown'}")
+            console.print(f"  {job.title} @ {job.company or 'Unknown'} [{lane}]")
 
             async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
-                pipeline = PolishPipeline(db, claude, settings, resume_path=resume_path)
-                result = await pipeline.polish_job(job_id)
+                pipeline = PolishPipeline(db, claude, settings)
+                try:
+                    result = await pipeline.polish_job(job_id, lane, force=force)
+                except (JobNotFoundError, ValueError, FileNotFoundError) as e:
+                    console.print(f"[red]{e}[/red]")
+                    raise typer.Exit(1)
 
-            if result is None:
-                console.print("[red]Cover letter generation failed — check logs.[/red]")
-                return
+        console.print(f"\n[dim]Context source:[/dim] "
+                      f"{_CONTEXT_LABELS.get(result.context_source, result.context_source)}")
+        if result.from_cache:
+            note = ("manually edited — kept" if result.edited
+                    else "served from cache")
+            console.print(f"[dim]{note.capitalize()}; use --force to regenerate.[/dim]")
+        elif result.gen_result:
+            g = result.gen_result
+            console.print(f"[dim]Model: {g.model_used} | "
+                          f"Tokens: {g.input_tokens} in / {g.output_tokens} out | "
+                          f"Cost: {g.cost_display}[/dim]")
 
-            console.print(f"\n[green]Cover letter generated![/green]")
-            console.print(f"[dim]Model: {result.model_used} | "
-                         f"Tokens: {result.input_tokens} in / {result.output_tokens} out | "
-                         f"Cost: {result.cost_display}[/dim]\n")
-            console.print("[bold]--- Cover Letter ---[/bold]\n")
-            console.print(result.cover_letter)
-            console.print(f"\n[dim]Saved to database — view at http://192.168.5.58:8080/jobs/{job_id}[/dim]")
+        console.print("\n[bold]--- Cover Letter ---[/bold]\n")
+        console.print(result.text)
+        console.print(f"\n  TXT:  {result.txt_path}\n  PDF:  {result.pdf_path}\n"
+                      f"  DOCX: {result.docx_path}")
+        console.print(f"[dim]Edit it at http://192.168.5.58:8080/jobs/{job_id}[/dim]")
+
+    asyncio.run(_run())
+
+
+# Same command under a name that matches `resume`
+app.command("cover-letter", help="Alias for `polish`.")(polish)
+
+
+@app.command("migrate-cover-letters")
+def migrate_cover_letters() -> None:
+    """One-time: move legacy evaluation cover letter drafts into editable files."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        from app.polisher.pipeline import PolishPipeline
+
+        async with Database(settings.db_path) as db:
+            pipeline = PolishPipeline(db, None, settings)
+            count = await pipeline.migrate_legacy_cover_letters()
+
+        if count:
+            console.print(f"[green]Migrated {count} legacy cover letter(s).[/green] "
+                          "They're now editable in the dashboard.")
+        else:
+            console.print("[dim]No legacy cover letters to migrate.[/dim]")
+
+    asyncio.run(_run())
+
+
+# ------------------------------------------------------------------
+# parse-linkedin command
+# ------------------------------------------------------------------
+
+@app.command("parse-linkedin")
+def parse_linkedin(
+    zip_path: Optional[str] = typer.Option(
+        None, "--zip", help="LinkedIn export ZIP. Default: resumes/linkedin_export.zip",
+    ),
+) -> None:
+    """Parse your LinkedIn data export into resumes/linkedin_data.json."""
+    from pathlib import Path as P
+    from app.resume_generator.linkedin_parser import (
+        DEFAULT_DATA_PATH, DEFAULT_EXPORT_PATH, parse_linkedin_export,
+    )
+
+    settings = _get_settings()
+    path = P(zip_path) if zip_path else DEFAULT_EXPORT_PATH
+    if not path.exists():
+        console.print(
+            f"[red]{path} not found.[/red]\n"
+            "Download your data from LinkedIn → Settings & Privacy → Data privacy → "
+            "Get a copy of your data, then save the ZIP there."
+        )
+        raise typer.Exit(1)
+
+    data = parse_linkedin_export(path, contact=settings.profile.contact)
+
+    starts = [p.start_date for p in data.positions if p.start_date]
+    ends = [p.end_date or "present" for p in data.positions]
+    date_range = f"{min(starts)} → {max(ends)}" if starts else "unknown"
+
+    table = Table(title=f"LinkedIn Export — {data.full_name}")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Positions", str(len(data.positions)))
+    table.add_row("Skills", str(len(data.skills)))
+    table.add_row("Education", str(len(data.education)))
+    table.add_row("Certifications", str(len(data.certifications)))
+    table.add_row("Date range", date_range)
+    table.add_row("Saved to", str(DEFAULT_DATA_PATH))
+    console.print(table)
+
+    if data.parse_warnings:
+        console.print("\n[yellow]Warnings:[/yellow]")
+        for w in data.parse_warnings:
+            console.print(f"  [yellow]•[/yellow] {w}")
+
+
+# ------------------------------------------------------------------
+# resume command
+# ------------------------------------------------------------------
+
+@app.command()
+def resume(
+    job_id: int = typer.Argument(..., help="Job ID to tailor a resume for."),
+    lane: str = typer.Option(..., "--lane", "-l", help="Search lane, e.g. frontend_developer."),
+    force: bool = typer.Option(False, "--force", help="Regenerate even if cached."),
+) -> None:
+    """Generate a job-tailored resume (PDF + DOCX) using Claude API."""
+    settings = _get_settings()
+
+    if not settings.secrets.anthropic_api_key:
+        console.print(
+            "[red]Anthropic API key not configured.[/red]\n"
+            "Add ANTHROPIC_API_KEY to config/secrets.env"
+        )
+        raise typer.Exit(1)
+
+    async def _run() -> None:
+        from app.polisher.claude_client import ClaudeClient
+        from app.resume_generator.pipeline import JobNotFoundError, ResumePipeline
+
+        async with Database(settings.db_path) as db:
+            async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
+                pipeline = ResumePipeline(db, claude, settings)
+                try:
+                    result = await pipeline.generate_for_job(job_id, lane, force=force)
+                except (JobNotFoundError, ValueError, FileNotFoundError) as e:
+                    console.print(f"[red]{e}[/red]")
+                    raise typer.Exit(1)
+
+        r = result.resume
+        console.print(f"\n[bold green]Resume ready[/bold green] — {r.headline}")
+
+        if r.matched_requirements:
+            console.print("\n[green]Matched requirements:[/green]")
+            for req in r.matched_requirements:
+                console.print(f"  [green]✓[/green] {req}")
+        if r.unmatched_requirements:
+            console.print("\n[yellow]Unmatched requirements:[/yellow]")
+            for req in r.unmatched_requirements:
+                console.print(f"  [yellow]–[/yellow] {req}")
+        if r.fabrication_warnings:
+            console.print("\n[red]Fabrication warnings (removed from resume):[/red]")
+            for w in r.fabrication_warnings:
+                console.print(f"  [red]![/red] {w}")
+
+        if result.from_cache:
+            console.print("\n[dim]Served from cache — use --force to regenerate.[/dim]")
+        elif result.gen_result:
+            g = result.gen_result
+            console.print(f"\n[dim]Model: {g.model_used} | "
+                          f"Tokens: {g.input_tokens} in / {g.output_tokens} out | "
+                          f"Cost: {g.cost_display}[/dim]")
+        console.print(f"\n  PDF:  {result.pdf_path}\n  DOCX: {result.docx_path}")
+
+    asyncio.run(_run())
+
+
+# ------------------------------------------------------------------
+# apply queue commands
+# ------------------------------------------------------------------
+
+@app.command("apply-queue")
+def apply_queue(
+    limit: int = typer.Option(50, "--limit", "-n", help="Max rows to show."),
+) -> None:
+    """Show the apply queue (newest first)."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        async with Database(settings.db_path) as db:
+            rows = await db.get_apply_queue(limit=limit)
+
+        if not rows:
+            console.print("[dim]Apply queue is empty.[/dim]")
+            return
+
+        colors = {"pending": "yellow", "claimed": "cyan", "in_progress": "cyan",
+                  "completed": "green", "abandoned": "dim", "failed": "red"}
+        table = Table(title="Apply Queue")
+        for col in ("#", "Queued", "Job", "Lane", "Status", "ATS", "Filled/Flagged", "Notes"):
+            table.add_column(col)
+        for r in rows:
+            color = colors.get(r["status"], "white")
+            filled = (f"{r['fields_filled']}/{r['fields_flagged'] or 0}"
+                      if r["fields_filled"] is not None else "—")
+            table.add_row(
+                str(r["id"]), r["queued_at"] or "",
+                f"#{r['job_id']} {r['job_title']} @ {r['job_company'] or 'N/A'}",
+                r["search_lane"] or "", f"[{color}]{r['status']}[/{color}]",
+                r["ats_detected"] or "—", filled, (r["notes"] or "")[:60],
+            )
+        console.print(table)
+
+    asyncio.run(_run())
+
+
+@app.command("queue-apply")
+def queue_apply(
+    job_id: int = typer.Argument(..., help="Job ID to queue for the apply client."),
+    lane: str = typer.Option(..., "--lane", "-l", help="Search lane, e.g. frontend_developer."),
+    force: bool = typer.Option(
+        False, "--force", help="Queue despite warnings (blocking checks still apply).",
+    ),
+) -> None:
+    """Run pre-flight checks and queue a job for the Windows apply client."""
+    settings = _get_settings()
+
+    async def _run() -> None:
+        from app.applicator.preflight import preflight_and_enqueue
+        from app.database import ApplyQueueError
+
+        async with Database(settings.db_path) as db:
+            try:
+                checks, queue_id = await preflight_and_enqueue(
+                    db, settings, job_id, lane, force=force)
+            except (LookupError, ValueError, ApplyQueueError) as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(1)
+
+        console.print(f"\n[bold]Pre-flight — job #{job_id} [{lane}][/bold]")
+        for c in checks:
+            icon = ("[green]✓[/green]" if c.ok else
+                    "[yellow]![/yellow]" if c.warning else "[red]✗[/red]")
+            console.print(f"  {icon} {c.name}: [dim]{c.detail}[/dim]")
+
+        if queue_id is not None:
+            console.print(f"\n[green]Queued as apply request #{queue_id}.[/green] "
+                          "The Windows apply client will pick it up.")
+        elif any(c.blocking for c in checks):
+            console.print("\n[red]Not queued — fix the ✗ items first.[/red]")
+            raise typer.Exit(1)
+        else:
+            console.print("\n[yellow]Not queued — only warnings remain. "
+                          "Re-run with --force to queue anyway.[/yellow]")
+            raise typer.Exit(1)
 
     asyncio.run(_run())
 

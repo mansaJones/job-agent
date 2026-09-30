@@ -5,6 +5,7 @@ Uses the Telegram Bot API directly via httpx (no extra dependencies).
 
 from __future__ import annotations
 
+import html
 import logging
 from typing import Any
 
@@ -140,6 +141,29 @@ class TelegramNotifier:
             f"  🟡 Maybe: {maybe}\n"
             f"  🔴 Rejected: {rejected}"
         )
+        return await self.send_message(message)
+
+    async def send_apply_result(
+        self,
+        job_title: str,
+        company: str,
+        status: str,
+        fields_filled: int | None,
+        fields_flagged: int | None,
+        notes: str | None,
+    ) -> bool:
+        """Notify when the apply client finishes a request."""
+        title, company_s = html.escape(job_title or "?"), html.escape(company or "?")
+        if status == "completed":
+            message = (
+                f"✅ <b>Applied</b> — {title} @ {company_s} "
+                f"({fields_filled or 0} auto-filled, {fields_flagged or 0} manual)"
+            )
+        else:
+            message = (
+                f"⚠️ <b>Apply {html.escape(status)}</b> — {title} @ {company_s}: "
+                f"{html.escape(notes or 'no notes')}"
+            )
         return await self.send_message(message)
 
     async def send_alert(self, title: str, body: str) -> bool:

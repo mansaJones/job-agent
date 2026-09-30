@@ -7,7 +7,9 @@
 </div>
 
 <div class="detail-header">
-    <h1>{{ job.title }}</h1>
+    <h1>{{ job.title }}
+        <span class="lane-badge lane-{{ job.search_lane or 'none' }}">{{ job.search_lane|humanize_lane }}</span>
+    </h1>
     <div class="detail-meta">
         <span>{{ job.company or 'Unknown Company' }}</span>
         <span>{{ job.location or 'Location N/A' }}</span>
@@ -23,8 +25,46 @@
     {% include "partials/decision_badge.html" %}
 </div>
 
+{% if lane_evals %}
+<!-- Found by multiple lanes — compare how it scored against each -->
+<div class="card">
+    <h2>Evaluations by Lane</h2>
+    <div class="lane-eval-grid">
+        {% for item in lane_evals %}
+        <div class="eval-breakdown">
+            <div class="eval-item">
+                <div class="label">Lane</div>
+                <div class="value">
+                    <span class="lane-badge lane-{{ item.lane }}">{{ item.lane|humanize_lane }}</span>
+                    {% if item.eval and item.eval.match_score is not none %}
+                    <span class="score {{ score_color(item.eval.match_score) }}">{{ "%.2f"|format(item.eval.match_score) }}</span>
+                    {% endif %}
+                </div>
+            </div>
+            {% if item.eval %}
+            {% if item.eval.reasoning %}
+            <div class="eval-item">
+                <div class="label">Reasoning</div>
+                <div class="value">{{ item.eval.reasoning }}</div>
+            </div>
+            {% endif %}
+            <div class="eval-item">
+                <div class="label">Model</div>
+                <div class="value" style="color: var(--text-muted);">{{ item.eval.model_used }}</div>
+            </div>
+            {% else %}
+            <div class="eval-item">
+                <div class="value" style="color: var(--text-muted);">Not evaluated for this lane yet.</div>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 <div class="detail-grid">
-    <!-- Left column: Description + Cover Letter -->
+    <!-- Left column: Description → Resume → Cover Letter → Apply -->
     <div>
         <div class="card">
             <h2>Description</h2>
@@ -37,30 +77,91 @@
             {% endif %}
         </div>
 
-        <!-- Cover Letter section (opt-in per job) -->
-        <div id="cover-letter-area">
-            {% if job.cover_letter %}
-            <!-- Already generated — always show -->
-            <div class="card" style="border-color: var(--accent);">
-                <h2 style="color: var(--accent);">Cover Letter</h2>
-                <div class="detail-description" id="cover-letter-text" style="white-space: pre-wrap;">{{ job.cover_letter }}</div>
-                <div style="margin-top: 1rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
-                    <button class="btn btn-primary btn-sm"
-                            hx-post="/api/jobs/{{ job.id }}/polish"
-                            hx-target="#cover-letter-area"
-                            hx-swap="innerHTML">
-                        Regenerate
-                    </button>
-                    <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('cover-letter-text').innerText).then(() => this.innerText = 'Copied!')">
-                        Copy to clipboard
+        <!-- Resume section (opt-in per job, one panel per lane) -->
+        <div id="resume-area">
+            {% for lane_name in doc_lanes %}
+            <div id="resume-panel-{{ lane_name }}">
+                {% if existing_resumes.get(lane_name) %}
+                {% set ctx = existing_resumes[lane_name] %}
+                {% with job_id=ctx.job_id, lane=ctx.lane, resume=ctx.resume, from_cache=ctx.from_cache,
+                        cost=ctx.cost, model=ctx.model, generated_at=ctx.generated_at %}
+                {% include "partials/resume_panel.html" %}
+                {% endwith %}
+                {% endif %}
+            </div>
+            {% endfor %}
+
+            {% set missing_lanes = doc_lanes|reject("in", existing_resumes)|list %}
+            {% if missing_lanes %}
+            <div class="card" id="resume-opt-in">
+                <div style="display: flex; align-items: center; justify-content: space-between;">
+                    <span style="color: var(--text-muted); font-size: 0.9rem;">
+                        {% if existing_resumes %}Resume for other lane not generated{% else %}Resume not generated{% endif %}
+                    </span>
+                    <button class="btn btn-ghost btn-sm"
+                            onclick="document.getElementById('resume-opt-in').style.display='none'; document.getElementById('resume-generator').style.display='block';">
+                        Generate resume for this one
                     </button>
                 </div>
             </div>
-            {% else %}
-            <!-- No cover letter yet — show opt-in toggle instead of always-visible generator -->
+            <div class="card" id="resume-generator" style="display: none;">
+                <h2>Resume</h2>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                    Tailor your LinkedIn experience to this job using Claude API. Anything not backed by your data is removed and flagged.
+                </p>
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                    {% for lane_name in missing_lanes %}
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/jobs/{{ job.id }}/generate-resume"
+                            hx-vals='{"lane": "{{ lane_name }}"}'
+                            hx-target="#resume-panel-{{ lane_name }}"
+                            hx-swap="innerHTML"
+                            hx-indicator="#resume-gen-spinner">
+                        {{ lane_name|humanize_lane }} resume
+                    </button>
+                    {% endfor %}
+                    <button class="btn btn-ghost btn-sm"
+                            onclick="document.getElementById('resume-generator').style.display='none'; document.getElementById('resume-opt-in').style.display='block';">
+                        Never mind
+                    </button>
+                    <span id="resume-gen-spinner" class="htmx-indicator" style="color: var(--text-muted); font-size: 0.85rem;">Generating (up to a minute)...</span>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Cover Letter section (opt-in per job, one panel per lane) -->
+        <div id="cover-letter-area">
+            {% for lane_name in doc_lanes %}
+            <div id="cover-letter-panel-{{ lane_name }}">
+                {% if existing_cover_letters.get(lane_name) %}
+                {% set cl = existing_cover_letters[lane_name] %}
+                {% with job_id=cl.job_id, lane=cl.lane, text=cl.text, from_cache=cl.from_cache,
+                        edited=cl.edited, model=cl.model, cost=cl.cost,
+                        context_source=cl.context_source, saved=cl.saved %}
+                {% include "partials/cover_letter.html" %}
+                {% endwith %}
+                {% endif %}
+            </div>
+            {% endfor %}
+
+            {% if show_legacy_cover_letter %}
+            <div class="card">
+                <h2>Cover Letter <span class="badge badge-neutral">legacy</span></h2>
+                <div class="detail-description" style="white-space: pre-wrap;">{{ job.cover_letter }}</div>
+                <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.75rem;">
+                    Legacy draft — run <code>job-agent migrate-cover-letters</code> to make it editable.
+                </p>
+            </div>
+            {% endif %}
+
+            {% set missing_cl_lanes = doc_lanes|reject("in", existing_cover_letters)|list %}
+            {% if missing_cl_lanes %}
             <div class="card" id="cover-letter-opt-in">
                 <div style="display: flex; align-items: center; justify-content: space-between;">
-                    <span style="color: var(--text-muted); font-size: 0.9rem;">Cover letter not generated</span>
+                    <span style="color: var(--text-muted); font-size: 0.9rem;">
+                        {% if existing_cover_letters %}Cover letter for other lane not generated{% else %}Cover letter not generated{% endif %}
+                    </span>
                     <button class="btn btn-ghost btn-sm"
                             onclick="document.getElementById('cover-letter-opt-in').style.display='none'; document.getElementById('cover-letter-generator').style.display='block';">
                         I want a cover letter for this one
@@ -70,16 +171,22 @@
             <div class="card" id="cover-letter-generator" style="display: none;">
                 <h2>Cover Letter</h2>
                 <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
-                    Generate a tailored cover letter using Claude API.
+                    Generate a lane-aware cover letter using Claude API.
+                    {% if missing_cl_lanes|reject("in", existing_resumes)|list %}
+                    <br><span style="color: var(--yellow);">Tip: generate the resume first — the letter is written from it when it exists.</span>
+                    {% endif %}
                 </p>
-                <div style="display: flex; align-items: center; gap: 1rem;">
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                    {% for lane_name in missing_cl_lanes %}
                     <button class="btn btn-primary btn-sm"
-                            hx-post="/api/jobs/{{ job.id }}/polish"
-                            hx-target="#cover-letter-area"
+                            hx-post="/api/jobs/{{ job.id }}/generate-cover-letter"
+                            hx-vals='{"lane": "{{ lane_name }}"}'
+                            hx-target="#cover-letter-panel-{{ lane_name }}"
                             hx-swap="innerHTML"
                             hx-indicator="#polish-spinner">
-                        Generate Cover Letter
+                        {{ lane_name|humanize_lane }} cover letter
                     </button>
+                    {% endfor %}
                     <button class="btn btn-ghost btn-sm"
                             onclick="document.getElementById('cover-letter-generator').style.display='none'; document.getElementById('cover-letter-opt-in').style.display='block';">
                         Never mind
@@ -89,12 +196,42 @@
             </div>
             {% endif %}
         </div>
+
+        <!-- Apply section — pre-flight, then hand off to the Windows apply client -->
+        <div id="apply-area">
+            {% if apply_request %}
+            {% include "partials/apply_status.html" %}
+            {% endif %}
+            {% if not apply_request or apply_request.status in ("abandoned", "failed") %}
+            <div class="card">
+                <h2>Apply</h2>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0.75rem;">
+                    Checks that the resume and cover letter are ready, then queues the job for the apply client on your PC.
+                    It fills the application and stops — you review and click Submit yourself.
+                </p>
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                    {% for lane_name in doc_lanes %}
+                    <button class="btn btn-primary btn-sm"
+                            hx-post="/api/jobs/{{ job.id }}/queue-apply"
+                            hx-vals='{"lane": "{{ lane_name }}"}'
+                            hx-target="#apply-panel-{{ lane_name }}"
+                            hx-swap="innerHTML">
+                        Check &amp; queue for apply{% if doc_lanes|length > 1 %} ({{ lane_name|humanize_lane }}){% endif %}
+                    </button>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% for lane_name in doc_lanes %}
+            <div id="apply-panel-{{ lane_name }}"></div>
+            {% endfor %}
+        </div>
     </div>
 
     <!-- Right column: Evaluation + Meta -->
     <div>
         <!-- Evaluation -->
-        {% if job.eval_score is not none %}
+        {% if job.eval_score is not none and not lane_evals %}
         <div class="card">
             <h2>Evaluation</h2>
             <div class="eval-breakdown">
@@ -136,6 +273,10 @@
         <div class="card">
             <h2>Details</h2>
             <div class="eval-breakdown">
+                <div class="eval-item">
+                    <div class="label">Search Lane</div>
+                    <div class="value">{{ job.search_lane|humanize_lane }}</div>
+                </div>
                 <div class="eval-item">
                     <div class="label">Source</div>
                     <div class="value">{{ job.source }}</div>

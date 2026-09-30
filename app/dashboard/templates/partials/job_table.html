@@ -5,6 +5,7 @@
             <thead>
                 <tr>
                     <th>Title</th>
+                    <th>Lane</th>
                     <th>Company</th>
                     <th>Location</th>
                     <th>Salary</th>
@@ -17,6 +18,7 @@
                 {% for job in jobs %}
                 <tr id="job-row-{{ job.id }}">
                     <td><a href="/jobs/{{ job.id }}" class="job-title-link">{{ job.title }}</a></td>
+                    <td><span class="lane-badge lane-{{ job.search_lane or 'none' }}">{{ job.search_lane|humanize_lane }}</span></td>
                     <td class="company-text">{{ job.company or 'N/A' }}</td>
                     <td>{{ job.location or 'N/A' }}</td>
                     <td>{{ format_salary(job.salary_min, job.salary_max) }}</td>
@@ -87,8 +89,8 @@
 {% if total_pages > 1 %}
 <div class="pagination">
     {% if page > 1 %}
-    <a href="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page - 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
-       hx-get="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page - 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+    <a href="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}{% if current_lane %}lane={{ current_lane }}&{% endif %}page={{ page - 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+       hx-get="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}{% if current_lane %}lane={{ current_lane }}&{% endif %}page={{ page - 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
        hx-target="#job-list"
        hx-push-url="true">&laquo; Prev</a>
     {% endif %}
@@ -96,8 +98,8 @@
     <span class="current">{{ page }} / {{ total_pages }}</span>
 
     {% if page < total_pages %}
-    <a href="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page + 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
-       hx-get="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}page={{ page + 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+    <a href="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}{% if current_lane %}lane={{ current_lane }}&{% endif %}page={{ page + 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
+       hx-get="/jobs?{% if current_status %}status={{ current_status }}&{% endif %}{% if current_lane %}lane={{ current_lane }}&{% endif %}page={{ page + 1 }}&sort={{ current_sort }}&dir={{ current_dir }}"
        hx-target="#job-list"
        hx-push-url="true">Next &raquo;</a>
     {% endif %}
@@ -107,6 +109,6 @@
 {% else %}
 <div class="empty-state">
     <h3>No jobs found</h3>
-    <p>{% if current_status %}No jobs with status "{{ current_status }}".{% else %}Run a scrape to find jobs.{% endif %}</p>
+    <p>{% if current_status or current_lane %}No jobs match the current filters.{% else %}Run a scrape to find jobs.{% endif %}</p>
 </div>
 {% endif %}

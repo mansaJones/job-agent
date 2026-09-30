@@ -59,6 +59,7 @@ class ScraperStats:
         self.jobs_inserted: int = 0
         self.jobs_skipped_duplicate: int = 0
         self.jobs_skipped_blacklist: int = 0
+        self.jobs_tagged_both: int = 0
         self.errors: int = 0
         self.playwright_fetches: int = 0
         self.started_at: datetime = datetime.now(timezone.utc)
@@ -89,7 +90,8 @@ class ScraperStats:
         return (
             f"Pages: {self.pages_fetched} | Found: {self.jobs_found} | "
             f"Parsed: {self.jobs_parsed} | Inserted: {self.jobs_inserted} | "
-            f"Dupes: {self.jobs_skipped_duplicate} | Blacklisted: {self.jobs_skipped_blacklist} | "
+            f"Dupes: {self.jobs_skipped_duplicate} | Both-lane: {self.jobs_tagged_both} | "
+            f"Blacklisted: {self.jobs_skipped_blacklist} | "
             f"Errors: {self.errors} | PW: {self.playwright_fetches} | "
             f"Time: {self.duration_seconds:.1f}s"
         )
@@ -565,7 +567,13 @@ class BaseScraper(ABC):
         await asyncio.sleep(delay)
 
     async def run(self) -> ScraperStats:
-        """Execute the full scrape run across all configured queries and pages.
+        """Execute the full scrape run across all search lanes, queries, and pages.
+
+        Each enabled search lane is scraped in turn. Boards without explicit
+        search_queries build them from the lane's target_roles; boards with
+        explicit queries (e.g. usajobs) run those once per lane. Every job is
+        stamped with the lane that found it — a job found by a second lane is
+        promoted to 'both'.
 
         The adaptive health monitor evaluates after every page and may:
           - Escalate to Playwright-first fetching
@@ -577,100 +585,113 @@ class BaseScraper(ABC):
         self.stats = ScraperStats()
         self.health.reset()
         location = self.config.location or self.profile.preferences.location
+        lanes = self.profile.enabled_lanes
 
         logger.info(
-            "[%s] Starting scrape — %d queries, up to %d pages each",
-            self.SOURCE_NAME, len(self.config.search_queries), self.config.max_pages,
+            "[%s] Starting scrape — %d lanes (%s), up to %d pages per query",
+            self.SOURCE_NAME, len(lanes), ", ".join(l.name for l in lanes),
+            self.config.max_pages,
         )
 
         blocked = False
 
-        for query in self.config.search_queries:
+        for lane in lanes:
             if blocked or self.health.halted:
-                if self.health.halted:
-                    logger.error("[%s] HALTED by adaptive health: %s",
-                                 self.SOURCE_NAME, self.health.halt_reason)
-                else:
-                    logger.warning("[%s] Source is blocked — skipping remaining queries",
-                                   self.SOURCE_NAME)
                 break
 
-            for page in range(self.config.max_pages):
-                if self.health.halted:
-                    break
+            queries = self.config.search_queries or [r.lower() for r in lane.target_roles]
+            logger.info("[%s] Lane '%s' — %d queries",
+                        self.SOURCE_NAME, lane.name, len(queries))
 
-                url = self.build_search_url(query, location, page)
-                logger.info("[%s] Fetching page %d for '%s'%s",
-                            self.SOURCE_NAME, page + 1, query,
-                            " (Playwright-first)" if self.health.playwright_escalated else "")
-
-                result = await self.fetch_page(url)
-
-                if result.status == FetchStatus.BLOCKED:
-                    logger.error(
-                        "[%s] Blocked by %s — aborting entire scrape run. "
-                        "Try again later or check your IP/headers.",
-                        self.SOURCE_NAME, self.SOURCE_NAME,
-                    )
-                    blocked = True
-                    break
-
-                if result.html is None:
-                    logger.warning("[%s] Failed to fetch %s — skipping to next page",
-                                   self.SOURCE_NAME, url)
-                    # Let health monitor evaluate even on failure
-                    self.health.evaluate(self.SOURCE_NAME)
-                    continue
-
-                html = result.html
-                self.stats.pages_fetched += 1
-                self.save_html_snapshot(html, self.SOURCE_NAME, url)
-
-                try:
-                    jobs = self.parse_listing_page(html)
-                except Exception as e:
-                    logger.error("[%s] Parse error on %s: %s", self.SOURCE_NAME, url, e)
-                    self.stats.errors += 1
-                    self.health.record_parse_error()
-                    self.health.evaluate(self.SOURCE_NAME)
-                    continue
-
-                self.stats.jobs_found += len(jobs)
-                self.health.record_parse_result(len(jobs))
-
-                # Let health monitor evaluate after every page
-                self.health.evaluate(self.SOURCE_NAME)
-
-                if self.health.halted:
-                    logger.error("[%s] HALTED mid-run: %s",
-                                 self.SOURCE_NAME, self.health.halt_reason)
-                    break
-
-                if not jobs:
-                    logger.info("[%s] No jobs found on page %d — stopping query",
-                                self.SOURCE_NAME, page + 1)
-                    break
-
-                for job in jobs:
-                    self.stats.jobs_parsed += 1
-
-                    if self.is_blacklisted(job):
-                        self.stats.jobs_skipped_blacklist += 1
-                        logger.debug("[%s] Blacklisted: %s at %s",
-                                     self.SOURCE_NAME, job.title, job.company)
-                        continue
-
-                    if await self.db.job_url_exists(job.url):
-                        self.stats.jobs_skipped_duplicate += 1
-                        continue
-
-                    row_id = await self.db.insert_job(job)
-                    if row_id is not None:
-                        self.stats.jobs_inserted += 1
+            for query in queries:
+                if blocked or self.health.halted:
+                    if self.health.halted:
+                        logger.error("[%s] HALTED by adaptive health: %s",
+                                     self.SOURCE_NAME, self.health.halt_reason)
                     else:
-                        self.stats.jobs_skipped_duplicate += 1
+                        logger.warning("[%s] Source is blocked — skipping remaining queries",
+                                       self.SOURCE_NAME)
+                    break
 
-                await self.random_delay()
+                for page in range(self.config.max_pages):
+                    if self.health.halted:
+                        break
+
+                    url = self.build_search_url(query, location, page)
+                    logger.info("[%s] [%s] Fetching page %d for '%s'%s",
+                                self.SOURCE_NAME, lane.name, page + 1, query,
+                                " (Playwright-first)" if self.health.playwright_escalated else "")
+
+                    result = await self.fetch_page(url)
+
+                    if result.status == FetchStatus.BLOCKED:
+                        logger.error(
+                            "[%s] Blocked by %s — aborting entire scrape run. "
+                            "Try again later or check your IP/headers.",
+                            self.SOURCE_NAME, self.SOURCE_NAME,
+                        )
+                        blocked = True
+                        break
+
+                    if result.html is None:
+                        logger.warning("[%s] Failed to fetch %s — skipping to next page",
+                                       self.SOURCE_NAME, url)
+                        # Let health monitor evaluate even on failure
+                        self.health.evaluate(self.SOURCE_NAME)
+                        continue
+
+                    html = result.html
+                    self.stats.pages_fetched += 1
+                    self.save_html_snapshot(html, self.SOURCE_NAME, url)
+
+                    try:
+                        jobs = self.parse_listing_page(html)
+                    except Exception as e:
+                        logger.error("[%s] Parse error on %s: %s", self.SOURCE_NAME, url, e)
+                        self.stats.errors += 1
+                        self.health.record_parse_error()
+                        self.health.evaluate(self.SOURCE_NAME)
+                        continue
+
+                    self.stats.jobs_found += len(jobs)
+                    self.health.record_parse_result(len(jobs))
+
+                    # Let health monitor evaluate after every page
+                    self.health.evaluate(self.SOURCE_NAME)
+
+                    if self.health.halted:
+                        logger.error("[%s] HALTED mid-run: %s",
+                                     self.SOURCE_NAME, self.health.halt_reason)
+                        break
+
+                    if not jobs:
+                        logger.info("[%s] No jobs found on page %d — stopping query",
+                                    self.SOURCE_NAME, page + 1)
+                        break
+
+                    for job in jobs:
+                        self.stats.jobs_parsed += 1
+                        job.search_lane = lane.name
+
+                        if self.is_blacklisted(job):
+                            self.stats.jobs_skipped_blacklist += 1
+                            logger.debug("[%s] Blacklisted: %s at %s",
+                                         self.SOURCE_NAME, job.title, job.company)
+                            continue
+
+                        if await self.db.job_url_exists(job.url):
+                            if await self.db.add_lane_to_job(job.url, lane.name):
+                                self.stats.jobs_tagged_both += 1
+                            self.stats.jobs_skipped_duplicate += 1
+                            continue
+
+                        row_id = await self.db.insert_job(job)
+                        if row_id is not None:
+                            self.stats.jobs_inserted += 1
+                        else:
+                            self.stats.jobs_skipped_duplicate += 1
+
+                    await self.random_delay()
 
         # Persist health metrics for historical tracking
         await self.health.persist(

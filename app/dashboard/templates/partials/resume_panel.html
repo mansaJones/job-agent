@@ -1,0 +1,64 @@
+<div class="card resume-panel" style="border-color: var(--accent);">
+    <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <h2 style="color: var(--accent); margin-bottom: 0;">Resume</h2>
+        <span class="lane-badge lane-{{ lane }}">{{ lane|humanize_lane }}</span>
+    </div>
+
+    <div class="eval-breakdown" style="margin-top: 0.75rem;">
+        <div class="eval-item">
+            <div class="label">Headline</div>
+            <div class="value">{{ resume.headline }}</div>
+        </div>
+        <div class="eval-item">
+            <div class="label">Summary</div>
+            <div class="value">{{ resume.summary }}</div>
+        </div>
+
+        {% if resume.matched_requirements %}
+        <div class="eval-item">
+            <div class="label">Matched requirements</div>
+            <div class="value resume-badges">
+                {% for req in resume.matched_requirements %}<span class="badge badge-green">{{ req }}</span>{% endfor %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if resume.unmatched_requirements %}
+        <div class="eval-item">
+            <div class="label">No supporting experience</div>
+            <div class="value resume-badges">
+                {% for req in resume.unmatched_requirements %}<span class="badge badge-yellow">{{ req }}</span>{% endfor %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if resume.fabrication_warnings %}
+    <div class="fabrication-callout">
+        <strong>Removed — not found in your LinkedIn data:</strong>
+        <ul>
+            {% for w in resume.fabrication_warnings %}<li>{{ w }}</li>{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <div style="margin-top: 1rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <a class="btn btn-primary btn-sm" href="/api/jobs/{{ job_id }}/resume/{{ lane }}/download?fmt=pdf">Download PDF</a>
+            <a class="btn btn-ghost btn-sm" href="/api/jobs/{{ job_id }}/resume/{{ lane }}/download?fmt=docx">Download DOCX</a>
+            <button class="btn btn-ghost btn-sm"
+                    hx-post="/api/jobs/{{ job_id }}/generate-resume"
+                    hx-vals='{"lane": "{{ lane }}", "force": true}'
+                    hx-target="#resume-panel-{{ lane }}"
+                    hx-swap="innerHTML"
+                    hx-indicator="#resume-spinner-{{ lane }}">
+                Regenerate
+            </button>
+            <span id="resume-spinner-{{ lane }}" class="htmx-indicator" style="color: var(--text-muted); font-size: 0.85rem;">Generating...</span>
+        </div>
+        <span style="color: var(--text-muted); font-size: 0.8rem;">
+            {% if from_cache %}Served from cache{% if generated_at %} · generated {{ generated_at }}{% endif %}{% if model %} · {{ model }}{% endif %}
+            {% else %}{% if cost %}Cost: {{ cost }}{% endif %}{% if model %} · {{ model }}{% endif %}{% endif %}
+        </span>
+    </div>
+</div>

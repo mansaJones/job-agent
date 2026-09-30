@@ -33,6 +33,9 @@ CONFIG_DIR: Path = PROJECT_ROOT / "config"
 DATA_DIR: Path = PROJECT_ROOT / "data"
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
 HTML_SNAPSHOTS_DIR: Path = DATA_DIR / "html_snapshots"
+RESUMES_DIR: Path = PROJECT_ROOT / "resumes"
+GENERATED_RESUMES_DIR: Path = DATA_DIR / "generated_resumes"
+GENERATED_COVER_LETTERS_DIR: Path = DATA_DIR / "generated_cover_letters"
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +44,20 @@ HTML_SNAPSHOTS_DIR: Path = DATA_DIR / "html_snapshots"
 
 class SkillsConfig(BaseModel):
     must_have: list[str] = Field(default_factory=list)
+    # Gate skills — a job must list at least ONE of these to score well
+    must_have_any: list[str] = Field(default_factory=list)
     nice_to_have: list[str] = Field(default_factory=list)
+
+
+class SearchLaneConfig(BaseModel):
+    """One role family to search for (e.g. frontend dev vs. marketing manager)."""
+
+    name: str
+    enabled: bool = True
+    target_roles: list[str] = Field(default_factory=list)
+    target_field: str = ""
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    resume_version: str = ""
 
 
 class PreferencesConfig(BaseModel):
@@ -64,13 +80,59 @@ class BlacklistConfig(BaseModel):
         return [entry.lower().strip() for entry in v] if v else []
 
 
+class ContactConfig(BaseModel):
+    """Contact details for resumes — not all of these are in the LinkedIn export."""
+
+    email: str = ""
+    phone: str = ""
+    linkedin_url: str = ""
+    portfolio_url: str = ""
+
+
+class ApplicationAnswersConfig(BaseModel):
+    """Stock answers to questions that show up on nearly every application.
+
+    An empty string means "don't answer" — the apply client leaves it for you.
+    """
+
+    work_authorization: str = "Yes, I am authorized to work in the United States"
+    sponsorship_needed: str = "No"
+    start_availability: str = "Two weeks notice"
+    willing_to_relocate: str = "No"
+    remote_preference: str = "Remote or hybrid preferred"
+    salary_expectation: str = ""  # blank = skip; filled = medium confidence (always flagged)
+    referral_source: str = "Job board"
+    previously_applied: str = "No"
+    currently_employed: str = "Yes"
+    ok_to_contact_employer: str = "No"
+
+
+class MaintenanceConfig(BaseModel):
+    """Housekeeping settings — stale listing purge, etc."""
+
+    stale_listing_max_age_days: int = 30
+    preserve_statuses: list[str] = Field(default_factory=lambda: ["approved", "applied"])
+
+
 class ProfileConfig(BaseModel):
     """Your target job profile — loaded from config/profile.yaml."""
 
-    target_roles: list[str] = Field(default_factory=list)
-    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    search_lanes: dict[str, SearchLaneConfig] = Field(default_factory=dict)
     preferences: PreferencesConfig = Field(default_factory=PreferencesConfig)
     blacklist: BlacklistConfig = Field(default_factory=BlacklistConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
+    contact: ContactConfig = Field(default_factory=ContactConfig)
+    application_answers: ApplicationAnswersConfig = Field(
+        default_factory=ApplicationAnswersConfig)
+
+    @property
+    def enabled_lanes(self) -> list[SearchLaneConfig]:
+        """Lanes with enabled=True, in config order."""
+        return [lane for lane in self.search_lanes.values() if lane.enabled]
+
+    def get_lane(self, name: str) -> SearchLaneConfig | None:
+        """Look up a lane by name (enabled or not)."""
+        return self.search_lanes.get(name)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +183,8 @@ class SecretsConfig(BaseSettings):
     anthropic_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b-instruct-q4_K_M"
+    # Shared secret the Windows apply client sends as X-Apply-Token
+    apply_client_token: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +219,12 @@ def load_profile(path: Path | None = None) -> ProfileConfig:
     """Load job profile from YAML."""
     path = path or CONFIG_DIR / "profile.yaml"
     raw = _load_yaml(path)
+    for name, lane_data in (raw.get("search_lanes") or {}).items():
+        lane_data["name"] = name
     config = ProfileConfig(**raw)
-    logger.info("Loaded profile: %d target roles, %d must-have skills",
-                len(config.target_roles), len(config.skills.must_have))
+    enabled = [lane.name for lane in config.enabled_lanes]
+    logger.info("Loaded profile: %d search lanes (%d enabled: %s)",
+                len(config.search_lanes), len(enabled), ", ".join(enabled) or "none")
     return config
 
 
@@ -184,16 +251,13 @@ def _resolve_board_defaults(boards: BoardsConfig, profile: ProfileConfig) -> Non
     """Fill in board-level gaps from profile — profile.yaml is the single source of truth.
 
     Rules:
-      - If a board has no search_queries → generate from profile.target_roles (lowercased)
+      - search_queries are NOT inherited — a board with none gets its queries
+        built per lane at scrape time from each lane's target_roles. A board
+        with explicit search_queries runs them once per enabled lane.
       - If a board has no location → use profile.preferences.location
-      - If a board has no radius_miles (0) → use profile.preferences.max_commute_miles
+      - If a board has no radius_miles (None) → use profile.preferences.max_commute_miles
     """
     for board in boards.boards.values():
-        if not board.search_queries:
-            board.search_queries = [r.lower() for r in profile.target_roles]
-            logger.debug("Board '%s': inherited %d search queries from profile",
-                         board.name, len(board.search_queries))
-
         if not board.location:
             board.location = profile.preferences.location
             logger.debug("Board '%s': inherited location '%s' from profile",
@@ -215,7 +279,8 @@ def load_settings() -> AppSettings:
     _resolve_board_defaults(boards, profile)
 
     # Ensure critical directories exist
-    for directory in [DATA_DIR, LOGS_DIR, HTML_SNAPSHOTS_DIR, DATA_DIR / "backups"]:
+    for directory in [DATA_DIR, LOGS_DIR, HTML_SNAPSHOTS_DIR, DATA_DIR / "backups",
+                      GENERATED_RESUMES_DIR, GENERATED_COVER_LETTERS_DIR]:
         directory.mkdir(parents=True, exist_ok=True)
 
     return AppSettings(

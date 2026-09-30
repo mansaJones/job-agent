@@ -1,32 +1,64 @@
 # config/profile.yaml — Your target job profile
 # Edit these values to match what you're actually looking for.
+#
+# Each search lane is an independent role family with its own target roles
+# and skills. Scrapers run every enabled lane; preferences and blacklist are
+# shared across all lanes.
 
-target_roles:
-  - "Lead Frontend Developer"
-  - "Web Development Lead"
-  - "Front End Engineering Manager"
-  - "Senior Frontend Developer"
-  - "Development Manager"
+search_lanes:
+  frontend_developer:
+    enabled: true
+    target_roles:
+      - "Lead Frontend Developer"
+      - "Web Development Lead"
+      - "Front End Engineering Manager"
+      - "Senior Frontend Developer"
+      - "Development Manager"
+    target_field: "software/web development, engineering management"
+    skills:
+      must_have:
+        - "JavaScript"
+        - "React"
+        - "TypeScript"
+        - "HTML"
+        - "CSS"
+      nice_to_have:
+        - "Node.js"
+        - "AEM"
+        - "Angular"
+        - "Python"
+        - "Azure"
+        - "CI/CD"
+        - "RESTful APIs"
+        - "SQL"
+        - "Git"
+        - "Redux"
+        - "Bootstrap"
+    resume_version: "frontend_developer"
 
-skills:
-  must_have:
-    - "JavaScript"
-    - "React"
-    - "TypeScript"
-    - "HTML"
-    - "CSS"
-  nice_to_have:
-    - "Node.js"
-    - "AEM"
-    - "Angular"
-    - "Python"
-    - "Azure"
-    - "CI/CD"
-    - "RESTful APIs"
-    - "SQL"
-    - "Git"
-    - "Redux"
-    - "Bootstrap"
+  marketing_manager:
+    enabled: true
+    target_roles:
+      - "Marketing Manager"
+      - "Digital Marketing Manager"
+      - "Marketing Technology Manager"
+      - "MarTech Manager"
+      - "Web Marketing Manager"
+    target_field: "digital marketing, marketing technology, web marketing operations"
+    skills:
+      must_have_any:
+        - "AEM"
+        - "Adobe Experience Manager"
+        - "HTML"
+        - "JavaScript"
+      nice_to_have:
+        - "Marketo"
+        - "Adobe Analytics"
+        - "CSS"
+        - "Marketing Automation"
+        - "SEO"
+        - "Google Analytics"
+    resume_version: "marketing_manager"
 
 preferences:
   location: "Homewood, IL"
@@ -46,3 +78,33 @@ blacklist:
     - "clearance required"
     - "junior"
     - "entry level"
+
+# Contact details for generated resumes. Email/phone fall back to the LinkedIn
+# export if left blank; linkedin_url is not in the export, so set it here.
+contact:
+  email: ""
+  phone: ""
+  linkedin_url: ""
+  portfolio_url: "https://mansa-tech.com/portfolio/"
+
+# Stock answers the apply client uses for common application questions.
+# Leave a value blank ("") to have the client skip it and flag it for you.
+# There is intentionally no config for EEO/demographic questions — the client
+# always picks "decline to self-identify" or leaves them for you.
+application_answers:
+  work_authorization: "Yes, I am authorized to work in the United States"
+  sponsorship_needed: "No"
+  start_availability: "Two weeks notice"
+  willing_to_relocate: "No"
+  remote_preference: "Remote or hybrid preferred"
+  salary_expectation: ""            # leave blank to skip; filled = medium confidence
+  referral_source: "Job board"
+  previously_applied: "No"
+  currently_employed: "Yes"
+  ok_to_contact_employer: "No"
+
+maintenance:
+  stale_listing_max_age_days: 30
+  preserve_statuses:
+    - "approved"
+    - "applied"

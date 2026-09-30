@@ -9,18 +9,23 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import re
+import secrets
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, Query, Request,
+)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.config import load_settings, AppSettings
-from app.database import Database, DecisionRecord
+from app.database import ApplyQueueError, Database, DecisionRecord
 from app.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -119,6 +124,78 @@ def _format_salary(sal_min: float | None, sal_max: float | None) -> str:
     return "Not listed"
 
 
+def _humanize_lane(lane: str | None) -> str:
+    """'frontend_developer' → 'Frontend Developer'."""
+    if not lane:
+        return "Unassigned"
+    return lane.replace("_", " ").title()
+
+
+def _enabled_lane_names() -> list[str]:
+    return [lane.name for lane in get_settings().profile.enabled_lanes]
+
+
+def _doc_lanes(job: dict) -> list[str]:
+    """Lanes a resume can be generated for: every enabled lane for 'both', else the job's lane."""
+    lanes = _enabled_lane_names()
+    if job.get("search_lane") == "both":
+        return lanes
+    if job.get("search_lane") in lanes:
+        return [job["search_lane"]]
+    return lanes[:1]
+
+
+def _cover_letter_panel_ctx(job_id: int, lane: str, result: Any, *,
+                            saved: bool = False) -> dict[str, Any]:
+    """Template context for partials/cover_letter.html from a CoverLetterResult."""
+    gen = result.gen_result
+    return {
+        "job_id": job_id, "lane": lane, "text": result.text,
+        "from_cache": result.from_cache, "edited": result.edited,
+        "model": result.model_used, "cost": gen.cost_display if gen else None,
+        "context_source": result.context_source, "saved": saved,
+    }
+
+
+async def _download_filename(db: Database, job_id: int, kind: str, fmt: str) -> str:
+    """"{last_name}_{company_slug}_{kind}.{fmt}" for download responses."""
+    from app.resume_generator.linkedin_parser import load_linkedin_data
+
+    job = await db.get_job(job_id)
+    company_slug = re.sub(r"[^A-Za-z0-9]+", "_", (job.company if job else "") or "").strip("_")
+    try:
+        last_name = load_linkedin_data().last_name or kind
+    except FileNotFoundError:
+        last_name = kind
+    return f"{last_name}_{company_slug or 'job'}_{kind}.{fmt}"
+
+
+def _parse_force(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ("true", "1", "yes", "on") if value is not None else False
+
+
+async def _lane_and_force(request: Request, lane: str | None, force: Any) -> tuple[str | None, bool]:
+    """Read lane/force from form fields, falling back to a JSON body (same as api_decide)."""
+    if lane is not None:
+        return lane, _parse_force(force)
+    try:
+        body = await request.json()
+    except Exception:
+        return None, False
+    return body.get("lane"), _parse_force(body.get("force", False))
+
+
+def _resume_panel_ctx(job_id: int, lane: str, resume: Any, *, from_cache: bool,
+                      cost: str | None, model: str | None,
+                      generated_at: str | None = None) -> dict[str, Any]:
+    return {
+        "job_id": job_id, "lane": lane, "resume": resume, "from_cache": from_cache,
+        "cost": cost, "model": model, "generated_at": generated_at,
+    }
+
+
 # Register filters for Jinja2
 templates.env.filters["score_color"] = _score_color
 templates.env.filters["format_salary"] = lambda row: _format_salary(
@@ -126,6 +203,7 @@ templates.env.filters["format_salary"] = lambda row: _format_salary(
 )
 templates.env.globals["score_color"] = _score_color
 templates.env.globals["format_salary"] = _format_salary
+templates.env.filters["humanize_lane"] = _humanize_lane
 
 
 # ---------------------------------------------------------------------------
@@ -144,12 +222,13 @@ async def index(request: Request):
         status="maybe", limit=5, sort_by="eval_score", sort_dir="DESC"
     )
 
-    return templates.TemplateResponse("index.html", {
+    return templates.TemplateResponse(request, "index.html", {
         "request": request,
         "stats": stats,
         "top_matches": top_matches,
         "recent_maybes": recent_maybes,
         "running_tasks": _running_tasks,
+        "lanes": _enabled_lane_names(),
     })
 
 
@@ -161,15 +240,16 @@ async def jobs_page(
     limit: int = Query(20, ge=1, le=100),
     sort: str = Query("date_scraped"),
     dir: str = Query("DESC"),
+    lane: str | None = Query(None),
 ):
-    """Job list page with filters."""
+    """Job list page with status + lane filters."""
     db = get_db()
     offset = (page - 1) * limit
     jobs, total = await db.get_jobs_paginated(
-        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir
+        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir, lane=lane,
     )
     total_pages = max(1, (total + limit - 1) // limit)
-    all_stats = await db.get_stats()
+    all_stats = await db.get_stats(lane=lane)
 
     ctx = {
         "request": request,
@@ -181,14 +261,17 @@ async def jobs_page(
         "current_status": status,
         "current_sort": sort,
         "current_dir": dir,
+        "current_lane": lane,
+        "lanes": _enabled_lane_names(),
         "stats": all_stats,
     }
 
-    # If HTMX request, return just the table partial
-    if request.headers.get("HX-Request"):
-        return templates.TemplateResponse("partials/job_table.html", ctx)
+    # HTMX pagination swaps just the table; filter tabs swap the whole view
+    # (full page + hx-select) so both tab rows re-render with the new filters.
+    if request.headers.get("HX-Request") and request.headers.get("HX-Target") == "job-list":
+        return templates.TemplateResponse(request, "partials/job_table.html", ctx)
 
-    return templates.TemplateResponse("jobs.html", ctx)
+    return templates.TemplateResponse(request, "jobs.html", ctx)
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
@@ -199,9 +282,56 @@ async def job_detail_page(request: Request, job_id: int):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    return templates.TemplateResponse("job_detail.html", {
+    # Jobs found by multiple lanes get one evaluation per lane, shown side by side
+    lane_evals = []
+    if job.get("search_lane") == "both":
+        for lane_name in _enabled_lane_names():
+            evaluation = await db.get_evaluation(job_id, lane=lane_name)
+            lane_evals.append({"lane": lane_name, "eval": evaluation})
+
+    # Previously generated documents render populated instead of the opt-in stubs
+    from app.polisher.pipeline import DOC_TYPE as COVER_LETTER, read_context_source
+    from app.resume_generator.pipeline import DOC_TYPE as RESUME, load_saved_resume
+
+    doc_lanes = _doc_lanes(job)
+    existing_resumes: dict[str, dict[str, Any]] = {}
+    existing_cover_letters: dict[str, dict[str, Any]] = {}
+    has_cover_letter_rows = False
+    for doc in await db.get_generated_documents_for_job(job_id):  # newest first
+        lane_name = doc["search_lane"]
+        if doc["doc_type"] == COVER_LETTER:
+            has_cover_letter_rows = True
+        if lane_name not in doc_lanes:
+            continue
+        pdf_path = Path(doc["file_path"])
+        if doc["doc_type"] == RESUME and lane_name not in existing_resumes:
+            saved = load_saved_resume(pdf_path)
+            if saved is not None:
+                existing_resumes[lane_name] = _resume_panel_ctx(
+                    job_id, lane_name, saved, from_cache=True, cost=None,
+                    model=doc["model_used"], generated_at=doc["generated_at"],
+                )
+        elif doc["doc_type"] == COVER_LETTER and lane_name not in existing_cover_letters:
+            txt_path = pdf_path.with_suffix(".txt")
+            if txt_path.exists():
+                existing_cover_letters[lane_name] = {
+                    "job_id": job_id, "lane": lane_name,
+                    "text": txt_path.read_text(encoding="utf-8"),
+                    "from_cache": True, "edited": doc["model_used"] == "manual-edit",
+                    "model": doc["model_used"], "cost": None,
+                    "context_source": read_context_source(txt_path), "saved": False,
+                }
+
+    return templates.TemplateResponse(request, "job_detail.html", {
         "request": request,
         "job": job,
+        "lane_evals": lane_evals,
+        "doc_lanes": doc_lanes,
+        "existing_resumes": existing_resumes,
+        "existing_cover_letters": existing_cover_letters,
+        "apply_request": await db.get_latest_apply_request(job_id),
+        # Legacy evaluations.cover_letter_draft only shows until letters are migrated
+        "show_legacy_cover_letter": bool(job.get("cover_letter")) and not has_cover_letter_rows,
     })
 
 
@@ -223,11 +353,12 @@ async def api_jobs(
     offset: int = Query(0, ge=0),
     sort: str = Query("date_scraped"),
     dir: str = Query("DESC"),
+    lane: str | None = Query(None),
 ):
     """List jobs with evaluation data."""
     db = get_db()
     jobs, total = await db.get_jobs_paginated(
-        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir,
+        status=status, limit=limit, offset=offset, sort_by=sort, sort_dir=dir, lane=lane,
     )
     return {"jobs": jobs, "total": total}
 
@@ -294,7 +425,7 @@ async def api_decide(
         hx_target = request.headers.get("HX-Target", "")
         if hx_target == "decision-area":
             job_data = await db.get_job_with_evaluation(job_id)
-            return templates.TemplateResponse("partials/decision_badge.html", {
+            return templates.TemplateResponse(request, "partials/decision_badge.html", {
                 "request": request,
                 "job": job_data,
             })
@@ -334,55 +465,453 @@ async def api_evaluate(request: Request, background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
-@app.post("/api/jobs/{job_id}/polish")
-async def api_polish(request: Request, job_id: int):
-    """Generate a cover letter for a job using Claude API."""
+def _error_badge(request: Request, message: str, status_code: int = 400):
+    # HTMX won't swap 4xx responses by default, so badges go back as 200
+    if request.headers.get("HX-Request"):
+        return HTMLResponse(f'<span class="badge badge-red">{message}</span>')
+    raise HTTPException(status_code=status_code, detail=message)
+
+
+@app.post("/api/jobs/{job_id}/generate-resume")
+async def api_generate_resume(
+    request: Request,
+    job_id: int,
+    lane: str | None = Form(None),
+    force: str | None = Form(None),
+):
+    """Generate (or serve cached) a job-tailored resume for one lane.
+
+    Accepts form-encoded (HTMX hx-vals) or JSON: {"lane": "...", "force": true}.
+    """
     settings = get_settings()
     db = get_db()
 
+    lane, force_flag = await _lane_and_force(request, lane, force)
+    if not lane:
+        return _error_badge(request, "No lane provided")
+
     if not settings.secrets.anthropic_api_key:
-        if request.headers.get("HX-Request"):
-            return HTMLResponse('<span class="badge badge-red">API key not configured</span>')
-        raise HTTPException(status_code=400, detail="Anthropic API key not configured")
+        return _error_badge(request, "API key not configured")
 
-    job = await db.get_job_with_evaluation(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    from app.resume_generator.linkedin_parser import DEFAULT_DATA_PATH
 
-    # Run synchronously (cover letters are fast, ~2-5s)
+    if not DEFAULT_DATA_PATH.exists():
+        return _error_badge(request, "Run `job-agent parse-linkedin` first")
+
     from app.polisher.claude_client import ClaudeClient
-    from app.polisher.pipeline import PolishPipeline
+    from app.resume_generator.pipeline import JobNotFoundError, ResumePipeline
 
     try:
         async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
-            pipeline = PolishPipeline(db, claude, settings)
-            result = await pipeline.polish_job(job_id)
+            pipeline = ResumePipeline(db, claude, settings)
+            result = await pipeline.generate_for_job(job_id, lane, force=force_flag)
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError as e:
+        return _error_badge(request, str(e))
     except Exception as e:
-        logger.error("Polish failed for job #%d: %s", job_id, e, exc_info=True)
-        if request.headers.get("HX-Request"):
-            return HTMLResponse(f'<span class="badge badge-red">Error: {e}</span>')
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Resume generation failed for job #%d [%s]: %s", job_id, lane, e,
+                     exc_info=True)
+        return _error_badge(request, f"Error: {e}", status_code=500)
 
-    if result is None:
-        if request.headers.get("HX-Request"):
-            return HTMLResponse('<span class="badge badge-red">Generation failed</span>')
-        raise HTTPException(status_code=500, detail="Cover letter generation failed")
-
+    gen = result.gen_result
     if request.headers.get("HX-Request"):
-        # Return the cover letter section for HTMX swap
-        return templates.TemplateResponse("partials/cover_letter.html", {
+        return templates.TemplateResponse(request, "partials/resume_panel.html", {
             "request": request,
-            "cover_letter": result.cover_letter,
-            "cost": result.cost_display,
-            "model": result.model_used,
+            **_resume_panel_ctx(
+                job_id, lane, result.resume, from_cache=result.from_cache,
+                cost=gen.cost_display if gen else None,
+                model=gen.model_used if gen else None,
+            ),
         })
 
     return {
         "status": "ok",
-        "cover_letter": result.cover_letter,
-        "cost": result.cost_display,
-        "model": result.model_used,
+        "resume": result.resume.model_dump(),
+        "pdf_path": str(result.pdf_path),
+        "docx_path": str(result.docx_path),
+        "from_cache": result.from_cache,
+        "cost": gen.cost_display if gen else None,
+        "model": gen.model_used if gen else None,
     }
+
+
+@app.get("/api/jobs/{job_id}/resume/{lane}/download")
+async def api_download_resume(job_id: int, lane: str, fmt: str = Query("pdf")):
+    """Download a generated resume as PDF or DOCX."""
+    if fmt not in ("pdf", "docx"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf or docx")
+
+    from app.resume_generator.pipeline import DOC_TYPE
+
+    db = get_db()
+    doc = await db.get_generated_document(job_id, lane, DOC_TYPE)
+    if not doc:
+        raise HTTPException(status_code=404, detail="No resume generated for this job/lane")
+    path = Path(doc["file_path"]).with_suffix(f".{fmt}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Resume file missing — regenerate it")
+
+    filename = await _download_filename(db, job_id, "resume", fmt)
+
+    media_type = (
+        "application/pdf" if fmt == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@app.post("/api/jobs/{job_id}/generate-cover-letter")
+async def api_generate_cover_letter(
+    request: Request,
+    job_id: int,
+    lane: str | None = Form(None),
+    force: str | None = Form(None),
+):
+    """Generate (or serve cached/edited) a lane-aware cover letter.
+
+    Accepts form-encoded (HTMX hx-vals) or JSON: {"lane": "...", "force": true}.
+    """
+    settings = get_settings()
+    db = get_db()
+
+    lane, force_flag = await _lane_and_force(request, lane, force)
+    if not lane:
+        return _error_badge(request, "No lane provided")
+    if not settings.secrets.anthropic_api_key:
+        return _error_badge(request, "API key not configured")
+
+    from app.polisher.claude_client import ClaudeClient
+    from app.polisher.pipeline import PolishPipeline
+    from app.resume_generator.pipeline import JobNotFoundError
+
+    try:
+        async with ClaudeClient(api_key=settings.secrets.anthropic_api_key) as claude:
+            pipeline = PolishPipeline(db, claude, settings)
+            result = await pipeline.polish_job(job_id, lane, force=force_flag)
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except (ValueError, FileNotFoundError) as e:
+        return _error_badge(request, str(e))
+    except Exception as e:
+        logger.error("Cover letter failed for job #%d [%s]: %s", job_id, lane, e, exc_info=True)
+        return _error_badge(request, f"Error: {e}", status_code=500)
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/cover_letter.html", {
+            "request": request, **_cover_letter_panel_ctx(job_id, lane, result),
+        })
+
+    gen = result.gen_result
+    return {
+        "status": "ok",
+        "cover_letter": result.text,
+        "context_source": result.context_source,
+        "from_cache": result.from_cache,
+        "edited": result.edited,
+        "model": result.model_used,
+        "cost": gen.cost_display if gen else None,
+        "txt_path": str(result.txt_path),
+        "pdf_path": str(result.pdf_path),
+        "docx_path": str(result.docx_path),
+    }
+
+
+@app.put("/api/jobs/{job_id}/cover-letter/{lane}")
+async def api_save_cover_letter(
+    request: Request, job_id: int, lane: str, text: str = Form(...),
+):
+    """Save a hand-edited cover letter and re-render its PDF/DOCX."""
+    from app.polisher.pipeline import PolishPipeline
+    from app.resume_generator.pipeline import JobNotFoundError
+
+    pipeline = PolishPipeline(get_db(), None, get_settings())
+    try:
+        result = await pipeline.save_edited_cover_letter(job_id, lane, text)
+    except JobNotFoundError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except ValueError as e:
+        return _error_badge(request, str(e))
+
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/cover_letter.html", {
+            "request": request, **_cover_letter_panel_ctx(job_id, lane, result, saved=True),
+        })
+    return {"status": "ok", "doc_id": result.doc_id, "model": result.model_used}
+
+
+@app.get("/api/jobs/{job_id}/cover-letter/{lane}/download")
+async def api_download_cover_letter(job_id: int, lane: str, fmt: str = Query("pdf")):
+    """Download a cover letter as PDF, DOCX, or TXT."""
+    if fmt not in ("pdf", "docx", "txt"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf, docx, or txt")
+
+    from app.polisher.pipeline import DOC_TYPE
+
+    db = get_db()
+    doc = await db.get_generated_document(job_id, lane, DOC_TYPE)
+    if not doc:
+        raise HTTPException(status_code=404, detail="No cover letter for this job/lane")
+    path = Path(doc["file_path"]).with_suffix(f".{fmt}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Cover letter file missing — regenerate it")
+
+    media_types = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "txt": "text/plain; charset=utf-8",
+    }
+    filename = await _download_filename(db, job_id, "cover_letter", fmt)
+    return FileResponse(path, media_type=media_types[fmt], filename=filename)
+
+
+# ---------------------------------------------------------------------------
+# Apply queue — dashboard side (no token, like the rest of the dashboard)
+# ---------------------------------------------------------------------------
+
+def _elapsed(row: dict) -> str:
+    """Human elapsed time for a queue row: queued/started → completed (or now)."""
+    start = row.get("started_at") or row.get("queued_at")
+    if not start:
+        return ""
+    end = row.get("completed_at")
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        t0 = datetime.strptime(start, fmt).replace(tzinfo=timezone.utc)
+        t1 = (datetime.strptime(end, fmt).replace(tzinfo=timezone.utc) if end
+              else datetime.now(timezone.utc))
+    except ValueError:
+        return ""
+    minutes = int((t1 - t0).total_seconds() // 60)
+    return f"{minutes // 60}h {minutes % 60}m" if minutes >= 60 else f"{minutes}m"
+
+
+async def _apply_queue_ctx(request: Request) -> dict[str, Any]:
+    rows = await get_db().get_apply_queue(limit=50)
+    for row in rows:
+        row["elapsed"] = _elapsed(row)
+    return {
+        "request": request,
+        "rows": rows,
+        "any_active": any(r["status"] in ("claimed", "in_progress") for r in rows),
+    }
+
+
+@app.get("/apply-queue", response_class=HTMLResponse)
+async def apply_queue_page(request: Request):
+    """Apply queue page — the table partial refreshes itself while anything is running."""
+    ctx = await _apply_queue_ctx(request)
+    if request.headers.get("HX-Request"):
+        return templates.TemplateResponse(request, "partials/apply_queue_table.html", ctx)
+    return templates.TemplateResponse(request, "apply_queue.html", ctx)
+
+
+@app.post("/api/apply-queue/reset-stale")
+async def api_apply_queue_reset_stale(request: Request):
+    """Send claims the client abandoned back to pending."""
+    count = await get_db().reset_stale_claims()
+    logger.info("Reset %d stale apply claim(s) from the dashboard", count)
+    ctx = await _apply_queue_ctx(request)
+    ctx["flash"] = f"Reset {count} stale claim(s)"
+    return templates.TemplateResponse(request, "partials/apply_queue_table.html", ctx)
+
+
+@app.post("/api/jobs/{job_id}/queue-apply")
+async def api_queue_apply(
+    request: Request,
+    job_id: int,
+    lane: str | None = Form(None),
+    force: str | None = Form(None),
+):
+    """Run pre-flight and queue the job for the apply client if it passes."""
+    from app.applicator.preflight import has_blockers, preflight_and_enqueue
+
+    lane, force_flag = await _lane_and_force(request, lane, force)
+    if not lane:
+        return _error_badge(request, "No lane provided")
+
+    db = get_db()
+    try:
+        checks, queue_id = await preflight_and_enqueue(db, get_settings(), job_id, lane,
+                                                       force=force_flag)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Job not found")
+    except (ValueError, ApplyQueueError) as e:
+        return _error_badge(request, str(e), status_code=409)
+
+    if request.headers.get("HX-Request"):
+        if queue_id is not None:
+            return templates.TemplateResponse(request, "partials/apply_status.html", {
+                "request": request, "apply_request": await db.get_latest_apply_request(job_id),
+                "just_queued": True,
+            })
+        return templates.TemplateResponse(request, "partials/apply_preflight.html", {
+            "request": request, "job_id": job_id, "lane": lane, "checks": checks,
+            "blocked": has_blockers(checks),
+        })
+
+    return {
+        "queued": queue_id is not None,
+        "queue_id": queue_id,
+        "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail, "severity": c.severity}
+                   for c in checks],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Apply queue — client API (Windows apply client, X-Apply-Token required)
+# ---------------------------------------------------------------------------
+
+async def require_apply_token(x_apply_token: str | None = Header(None)) -> None:
+    """Shared-secret auth for the apply client. 503 until a token is configured."""
+    expected = get_settings().secrets.apply_client_token
+    if not expected:
+        raise HTTPException(status_code=503, detail="apply_client_token not configured")
+    if not x_apply_token or not secrets.compare_digest(
+        x_apply_token.encode("utf-8"), expected.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Apply-Token")
+
+
+apply_api = APIRouter(prefix="/api/apply-queue", dependencies=[Depends(require_apply_token)])
+
+APPLY_DOC_TYPES = {"resume": "resume_path", "cover_letter": "cover_letter_path"}
+
+
+class ApplyProgress(BaseModel):
+    status: str
+    ats_detected: str | None = None
+    apply_url: str | None = None
+    fields_filled: int | None = None
+    fields_flagged: int | None = None
+    notes: str | None = None
+
+
+class ApplyResult(BaseModel):
+    status: str  # completed | abandoned | failed
+    notes: str | None = None
+
+
+def _applicant_payload() -> tuple[dict | None, str | None]:
+    from app.applicator.applicant_data import build_applicant_data
+    from app.resume_generator.linkedin_parser import load_linkedin_data
+
+    try:
+        return build_applicant_data(get_settings(), load_linkedin_data()).model_dump(), None
+    except (FileNotFoundError, ValueError) as e:
+        return None, str(e)
+
+
+def _apply_request_payload(row: dict, applicant: dict | None,
+                           applicant_error: str | None) -> dict[str, Any]:
+    qid = row["id"]
+    base = f"/api/apply-queue/{qid}/documents"
+    return {
+        "queue_id": qid,
+        "job_id": row["job_id"],
+        "lane": row["search_lane"],
+        "status": row["status"],
+        "queued_at": row["queued_at"],
+        "job": {
+            "title": row["job_title"],
+            "company": row["job_company"],
+            "url": row["job_url"],
+            "source": row["job_source"],
+            "description": (row["job_description"] or "")[:2000],
+        },
+        "applicant": applicant,
+        "applicant_error": applicant_error,
+        "documents": {
+            doc_type: {fmt: f"{base}/{doc_type}?fmt={fmt}" for fmt in ("pdf", "docx")}
+            for doc_type, col in APPLY_DOC_TYPES.items() if row.get(col)
+        },
+    }
+
+
+@apply_api.get("/health")
+async def api_apply_health():
+    return {"ok": True, "pending": len(await get_db().get_pending_apply_requests())}
+
+
+@apply_api.get("/pending")
+async def api_apply_pending():
+    rows = await get_db().get_pending_apply_requests()
+    applicant, error = _applicant_payload() if rows else (None, None)
+    return [_apply_request_payload(r, applicant, error) for r in rows]
+
+
+@apply_api.post("/{queue_id}/claim")
+async def api_apply_claim(queue_id: int):
+    db = get_db()
+    if await db.get_apply_request(queue_id) is None:
+        raise HTTPException(status_code=404, detail="Apply request not found")
+    row = await db.claim_apply_request(queue_id)
+    if row is None:
+        raise HTTPException(status_code=409, detail="Already claimed or not pending")
+    applicant, error = _applicant_payload()
+    return _apply_request_payload(row, applicant, error)
+
+
+@apply_api.get("/{queue_id}/documents/{doc_type}")
+async def api_apply_document(queue_id: int, doc_type: str, fmt: str = Query("pdf")):
+    if doc_type not in APPLY_DOC_TYPES:
+        raise HTTPException(status_code=404, detail="doc_type must be resume or cover_letter")
+    if fmt not in ("pdf", "docx"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf or docx")
+    db = get_db()
+    row = await db.get_apply_request(queue_id)
+    if row is None or not row.get(APPLY_DOC_TYPES[doc_type]):
+        raise HTTPException(status_code=404, detail="Apply request or document not found")
+    path = Path(row[APPLY_DOC_TYPES[doc_type]]).with_suffix(f".{fmt}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Document file missing on the Jetson")
+    media_type = (
+        "application/pdf" if fmt == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    filename = await _download_filename(db, row["job_id"], doc_type, fmt)
+    return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@apply_api.post("/{queue_id}/progress")
+async def api_apply_progress(queue_id: int, body: ApplyProgress):
+    db = get_db()
+    if await db.get_apply_request(queue_id) is None:
+        raise HTTPException(status_code=404, detail="Apply request not found")
+    try:
+        await db.update_apply_progress(queue_id, **body.model_dump())
+    except ApplyQueueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True}
+
+
+@apply_api.post("/{queue_id}/result")
+async def api_apply_result(queue_id: int, body: ApplyResult):
+    db = get_db()
+    if await db.get_apply_request(queue_id) is None:
+        raise HTTPException(status_code=404, detail="Apply request not found")
+    try:
+        await db.complete_apply_request(queue_id, body.status, body.notes)
+    except ApplyQueueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    row = await db.get_apply_request(queue_id)
+    from app.notifier.telegram import TelegramNotifier
+
+    notifier = TelegramNotifier.from_secrets(get_settings().secrets)
+    if notifier is not None:
+        try:
+            async with notifier as n:
+                await n.send_apply_result(
+                    row["job_title"], row["job_company"], body.status,
+                    row["fields_filled"], row["fields_flagged"], body.notes,
+                )
+        except Exception as e:
+            logger.warning("Telegram apply notification failed: %s", e)
+    return {"ok": True, "status": body.status}
+
+
+app.include_router(apply_api)
 
 
 @app.get("/api/tasks/status")

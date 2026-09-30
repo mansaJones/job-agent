@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import LOGS_DIR, load_settings, AppSettings
 from app.database import Database
@@ -127,6 +128,45 @@ class AgentRunner:
         await self.run_all_scrapers()
         await self.run_evaluations()
 
+    async def purge_stale_listings(self) -> None:
+        """Delete old listings that never progressed past review."""
+        maintenance = self.settings.profile.maintenance
+        logger.info(
+            "Stale listing purge starting — max age %d days, preserving: %s",
+            maintenance.stale_listing_max_age_days, ", ".join(maintenance.preserve_statuses),
+        )
+
+        try:
+            async with Database(self.settings.db_path) as db:
+                count = await db.purge_stale_listings(
+                    max_age_days=maintenance.stale_listing_max_age_days,
+                    preserve_statuses=maintenance.preserve_statuses,
+                )
+        except Exception as e:
+            logger.error("Stale listing purge failed: %s", e, exc_info=True)
+            await self._notify(
+                lambda n, _e=e: n.send_alert("Stale listing purge failed", str(_e))
+            )
+            return
+
+        logger.info("Stale listing purge complete — %d jobs deleted", count)
+
+        # Large purges usually mean a config problem (e.g. max age set too low)
+        if count > 100:
+            await self._notify(
+                lambda n, _c=count, _d=maintenance.stale_listing_max_age_days: n.send_alert(
+                    "Large stale listing purge",
+                    f"Deleted {_c} jobs older than {_d} days — check maintenance config",
+                )
+            )
+
+    async def reset_stale_claims(self) -> None:
+        """Return apply requests the Windows client abandoned (crash, walk-away) to pending."""
+        async with Database(self.settings.db_path) as db:
+            count = await db.reset_stale_claims()
+        if count:
+            logger.info("Reset %d stale apply claim(s) to pending", count)
+
     async def send_daily_digest(self) -> None:
         """Send the daily Telegram digest."""
         if self._notifier is None:
@@ -148,7 +188,9 @@ class AgentRunner:
         Schedule:
           - Full scrape every 6 hours on weekdays
           - Nightly scrape + evaluation at 2am daily (off-peak for LLM batch)
-          - Standalone evaluation at 3am (catch any stragglers)
+          - Standalone evaluation at 3:30am (catch any stragglers)
+          - Stale listing purge at 4am (after eval catch-up)
+          - Stale apply-claim reset every 15 minutes
         """
         # Main scrape — every 6 hours on weekdays
         self.scheduler.add_job(
@@ -174,6 +216,24 @@ class AgentRunner:
             CronTrigger(hour=3, minute=30),
             id="eval_catchup",
             name="Evaluation catch-up (3:30am)",
+            replace_existing=True,
+        )
+
+        # Stale listing purge — 4am, after the eval catch-up finishes
+        self.scheduler.add_job(
+            self.purge_stale_listings,
+            CronTrigger(hour=4, minute=0),
+            id="purge_stale",
+            name="Stale listing purge (4am)",
+            replace_existing=True,
+        )
+
+        # Apply queue housekeeping — every 15 minutes
+        self.scheduler.add_job(
+            self.reset_stale_claims,
+            IntervalTrigger(minutes=15),
+            id="reset_stale_claims",
+            name="Reset stale apply claims (15m)",
             replace_existing=True,
         )
 
